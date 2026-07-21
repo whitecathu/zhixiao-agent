@@ -1,0 +1,8 @@
+{
+  "name": "QualityReviewer",
+  "description": "质量审核技能，校验事实性 / 完整性 / 合规性并决定返工或通过",
+  "version": "1.0.0",
+  "author": "智效工坊团队",
+  "tags": ["review", "qa", "compliance"],
+  "dependencies": ["llm", "drafts", "materials"]
+}

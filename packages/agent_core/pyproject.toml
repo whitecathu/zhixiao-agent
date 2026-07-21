@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "zhixiao-agent"
+version = "1.0.0"
+description = "Auditable full-stack software engineering agent runtime"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "httpx>=0.28,<1",
+  "langgraph>=1.2,<2",
+  "langgraph-checkpoint-sqlite>=3.0,<4",
+  "pydantic>=2.11,<3",
+  "pydantic-settings>=2.10,<3",
+  "typer>=0.12,<1",
+  "rich>=14,<16",
+]
+
+[project.optional-dependencies]
+cli = ["textual>=0.70,<9"]
+rag = [
+  "chromadb>=0.5,<1",
+  "pymilvus>=2.5,<3",
+  "neo4j>=5.20,<6",
+]
+training = [
+  "datasets>=2.20,<4",
+  "peft>=0.12,<1",
+  "transformers>=4.44,<5",
+  "torch>=2.3,<3",
+  "trl>=0.9,<1",
+]
+dev = [
+  "mypy>=1.10,<2",
+  "pytest>=8,<9",
+  "pytest-asyncio>=0.23,<1",
+  "pytest-cov>=5,<7",
+  "ruff>=0.5,<1",
+]
+
+[project.scripts]
+zhixiao = "zhixiao_agent.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/zhixiao_agent"]

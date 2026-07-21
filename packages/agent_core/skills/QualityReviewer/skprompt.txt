@@ -1,0 +1,19 @@
+[质量审核规则]
+1. 出现 high 级问题或 risk >= 0.5 -> pass=false
+2. 仅出现 low 级问题 -> pass=true，在 suggestions 给出改进
+3. 任何事实陈述必须有对应素材引用，否则视为高风险
+4. 严格 JSON 输出，禁止包裹 markdown 代码块
+
+输出格式：
+{
+  "pass": true|false,
+  "issues": [{"subtask_id":"S1","severity":"high|medium|low","category":"fact|structure|format|compliance","description":""}],
+  "suggestions": ["..."],
+  "risk": 0.0
+}
+
+待审核内容：
+{{$drafts_json}}
+
+参考素材：
+{{$materials_json}}

@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  agent-core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install --index-url https://pypi.org/simple -e "packages/agent_core[dev,cli]"
+      - run: ruff check --config pyproject.toml packages/agent_core/src packages/agent_core/tests
+      - run: mypy --config-file pyproject.toml packages/agent_core/src
+      - run: pytest -q packages/agent_core/tests --cov=zhixiao_agent --cov-report=xml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-core-coverage
+          path: coverage.xml
+
+  api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install --index-url https://pypi.org/simple -e "apps/api[test]"
+      - run: pytest -q
+        working-directory: apps/api
+
+  worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install --index-url https://pypi.org/simple -e "packages/agent_core[dev]"
+      - run: pip install --index-url https://pypi.org/simple -r apps/worker/requirements.txt
+      - run: pytest -q apps/worker/tests
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - run: npm ci --no-audit
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build:prod
+
+  evaluation-manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m unittest discover -s tests/evals -p "test_*.py"
+      - run: python tests/evals/run_scenarios.py --validate-only --output evaluation-manifest.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: evaluation-manifest
+          path: evaluation-manifest.json
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: pip install --index-url https://pypi.org/simple bandit
+      - run: bandit -q -r apps/api/app packages/agent_core/src -lll -ii
+      - run: npm audit --omit=dev --audit-level=high
+        working-directory: apps/web
+
+  containers:
+    runs-on: ubuntu-latest
+    needs: [agent-core, api, worker, web, evaluation-manifest, security]
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp .env.example .env
+      - run: docker compose -f infra/docker-compose.yml config --quiet
+      - run: docker compose -f infra/docker-compose.yml build api worker web
+      - run: docker compose -f infra/docker-compose.yml up -d mysql redis api web
+      - run: |
+          for attempt in $(seq 1 30); do
+            curl --fail http://localhost:8000/health && curl --fail http://localhost:5173/health && exit 0
+            sleep 5
+          done
+          docker compose -f infra/docker-compose.yml logs
+          exit 1
+      - run: npm ci --no-audit
+        working-directory: tests/e2e
+      - run: npx playwright install --with-deps chromium
+        working-directory: tests/e2e
+      - run: npm run test:e2e
+        working-directory: tests/e2e
+      - if: always()
+        run: docker compose -f infra/docker-compose.yml down -v

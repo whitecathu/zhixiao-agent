@@ -1,0 +1,8 @@
+{
+  "name": "KnowledgeExtractor",
+  "description": "知识抽取技能，从任务执行结果中抽取四类结构化知识",
+  "version": "1.0.0",
+  "author": "智效工坊团队",
+  "tags": ["knowledge", "extractor", "sediment"],
+  "dependencies": ["llm", "drafts", "review"]
+}

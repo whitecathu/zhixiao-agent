@@ -1,0 +1,26 @@
+module.exports = {
+  root: true,
+  env: { browser: true, es2022: true, node: true },
+  extends: ["eslint:recommended", "plugin:vue/vue3-recommended"],
+  parser: "vue-eslint-parser",
+  parserOptions: {
+    parser: "@typescript-eslint/parser",
+    ecmaVersion: "latest",
+    sourceType: "module",
+  },
+  plugins: ["@typescript-eslint"],
+  rules: {
+    "no-unused-vars": "off",
+    "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_" }],
+    "vue/multi-word-component-names": "off",
+    "vue/no-v-html": "off",
+    "vue/max-attributes-per-line": "off",
+    "vue/attributes-order": "off",
+    "vue/first-attribute-linebreak": "off",
+    "vue/html-closing-bracket-newline": "off",
+    "vue/html-closing-bracket-spacing": "off",
+    "vue/multiline-html-element-content-newline": "off",
+    "vue/singleline-html-element-content-newline": "off",
+    "vue/html-self-closing": "off",
+  },
+};

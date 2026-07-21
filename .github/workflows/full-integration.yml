@@ -1,0 +1,37 @@
+name: Full integration
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 18 * * 6"
+
+permissions:
+  contents: read
+
+jobs:
+  compose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      LLM_API_KEY: ci-control-plane-only
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp .env.example .env
+      - run: docker compose -f infra/docker-compose.yml config --quiet
+      - run: docker compose -f infra/docker-compose.yml up -d --build
+      - run: |
+          for attempt in $(seq 1 60); do
+            unhealthy=$(docker compose -f infra/docker-compose.yml ps --format json | jq -r 'select(.Health == "unhealthy") | .Service')
+            test -z "$unhealthy" || { docker compose -f infra/docker-compose.yml logs "$unhealthy"; exit 1; }
+            curl --fail http://localhost:5173/health && curl --fail http://localhost:8000/health && exit 0
+            sleep 10
+          done
+          docker compose -f infra/docker-compose.yml logs
+          exit 1
+      - run: python tests/evals/run_scenarios.py --validate-only --output evaluation-manifest.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: full-integration-evidence
+          path: evaluation-manifest.json
+      - if: always()
+        run: docker compose -f infra/docker-compose.yml down -v

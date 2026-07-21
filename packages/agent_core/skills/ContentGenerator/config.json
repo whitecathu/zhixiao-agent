@@ -1,0 +1,8 @@
+{
+  "name": "ContentGenerator",
+  "description": "内容生成技能，基于检索素材生成高质量结构化交付内容",
+  "version": "1.0.0",
+  "author": "智效工坊团队",
+  "tags": ["content", "writing", "generation"],
+  "dependencies": ["llm", "materials"]
+}

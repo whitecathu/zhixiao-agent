@@ -1,0 +1,19 @@
+[知识抽取规则]
+1. 仅抽取明确、可复用、长度 50~600 字之间的内容
+2. 四类知识：experience / template / knowledge / pitfall
+3. 严格 JSON 数组输出，禁止包裹 markdown 代码块
+4. 含隐私 / 凭据 / 临时密码一律丢弃
+
+输出格式：
+[
+  {"type":"knowledge","title":"...","content":"...","tags":["..."],"category_path":"..."}
+]
+
+任务目标：
+{{$goal}}
+
+生成内容：
+{{$drafts_json}}
+
+审核意见：
+{{$review_json}}

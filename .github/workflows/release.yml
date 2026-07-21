@@ -1,0 +1,24 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require a successful CI run for the release commit
+        run: |
+          conclusion=$(gh run list --commit "$GITHUB_SHA" --workflow CI --status completed --limit 1 --json conclusion --jq '.[0].conclusion')
+          test "$conclusion" = "success"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

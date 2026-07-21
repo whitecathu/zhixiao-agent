@@ -1,0 +1,42 @@
+# ===== 智效工坊 后端依赖 (Python 3.11 + FastAPI 0.110+) =====
+# --- Web 框架与异步 ---
+fastapi>=0.116,<1
+uvicorn[standard]==0.27.1
+starlette>=0.40,<1
+python-multipart==0.0.9           #FormData / 表单/文件上传
+
+# --- 配置与日志 ---
+pydantic>=2.11,<3
+pydantic-settings>=2.10,<3         #BaseSettings (新版)
+email-validator>=2.2,<3
+python-dotenv==1.0.1
+loguru==0.7.2
+
+# --- 数据库 ---
+SQLAlchemy==2.0.27
+asyncmy==0.2.9                     # MySQL 异步驱动 (Py3.11)
+alembic==1.13.1
+
+# --- 缓存与队列 ---
+redis[hiredis]==5.0.3
+
+# --- 向量库 ---
+chromadb==0.4.24
+
+# --- 安全与认证 ---
+PyJWT==2.8.0
+bcrypt==4.1.2
+
+# --- 工具 ---
+python-dateutil==2.8.2
+orjson==3.9.15                     # 高性能 JSON
+tenacity==8.2.3                    # 重试
+
+# --- AI 引擎调用层抽象 (实际模型 SDK 在 GOAL-03 落地) ---
+httpx>=0.28,<1
+
+# --- 测试 ---
+pytest==8.0.2
+pytest-asyncio==0.23.5
+aiosqlite==0.20.0
+pytest-cov==5.0.0

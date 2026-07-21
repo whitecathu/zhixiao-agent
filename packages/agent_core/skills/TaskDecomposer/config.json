@@ -1,0 +1,8 @@
+{
+  "name": "TaskDecomposer",
+  "description": "任务拆解技能，将复杂任务分解为可执行的子任务",
+  "version": "1.0.0",
+  "author": "智效工坊团队",
+  "tags": ["task", "decomposition", "planning"],
+  "dependencies": ["llm", "task-manager"]
+}

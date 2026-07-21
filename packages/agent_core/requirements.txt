@@ -1,0 +1,2 @@
+# Compatibility entrypoint. Prefer: pip install -e ".[dev,cli]"
+-e .

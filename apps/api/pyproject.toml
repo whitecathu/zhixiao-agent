@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zhixiao-api"
+version = "1.0.0"
+description = "FastAPI control plane for the Zhixiao engineering agent"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "fastapi>=0.116,<1",
+    "uvicorn[standard]>=0.27,<0.28",
+    "pydantic>=2.11,<3",
+    "pydantic-settings>=2.10,<3",
+    "email-validator>=2.2,<3",
+    "SQLAlchemy>=2.0,<2.1",
+    "asyncmy>=0.2.9,<0.3",
+    "alembic>=1.13,<1.14",
+    "redis[hiredis]>=5.0,<5.1",
+    "PyJWT>=2.8,<2.9",
+    "bcrypt>=4.1,<4.2",
+    "loguru>=0.7,<0.8",
+    "orjson>=3.9,<4",
+]
+
+[project.optional-dependencies]
+test = [
+    "aiosqlite>=0.20,<0.21",
+    "httpx>=0.28,<1",
+    "pytest>=8,<9",
+    "pytest-asyncio>=0.23,<0.24",
+    "pytest-cov>=5,<6",
+]
+
+[project.scripts]
+zhixiao-api = "app.main:run"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = ["asyncio: asyncio tests"]

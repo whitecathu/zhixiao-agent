@@ -1,0 +1,38 @@
+name: GPU LoRA fine-tune
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_model:
+        description: Hugging Face 7B/14B base model
+        required: true
+      dataset:
+        description: Path to reviewed JSONL dataset on the runner
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  train:
+    runs-on: [self-hosted, linux, gpu]
+    timeout-minutes: 720
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install --index-url https://pypi.org/simple -e "packages/agent_core[training]"
+      - run: >-
+          python -m zhixiao_agent.training.trainer
+          --base-model "$BASE_MODEL"
+          --dataset "$DATASET"
+          --output artifacts/lora
+        env:
+          BASE_MODEL: ${{ inputs.base_model }}
+          DATASET: ${{ inputs.dataset }}
+      - run: test -f artifacts/lora/MODEL_CARD.md && test -f artifacts/lora/training_config.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lora-adapter-and-model-card
+          path: artifacts/lora
