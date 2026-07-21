@@ -15,6 +15,8 @@ dependencies = [
     "email-validator>=2.2,<3",
     "SQLAlchemy>=2.0,<2.1",
     "asyncmy>=0.2.9,<0.3",
+    # MySQL 8 uses caching_sha2_password by default; asyncmy needs this at runtime.
+    "cryptography>=44,<46",
     "alembic>=1.13,<1.14",
     "redis[hiredis]>=5.0,<5.1",
     "PyJWT>=2.8,<2.9",
