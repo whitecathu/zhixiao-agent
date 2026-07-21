@@ -4,8 +4,8 @@
 """
 
 from functools import lru_cache
-from typing import List, Union
-from pydantic import AnyHttpUrl, Field, field_validator
+
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,10 +20,13 @@ class Settings(BaseSettings):
     # 应用
     APP_NAME: str = "zhixiao-backend"
     APP_ENV: str = Field("dev", pattern="^(dev|test|prod)$")
-    APP_HOST: str = "0.0.0.0"
+    APP_HOST: str = "0.0.0.0"  # noqa: S104 - intentional service bind default
     APP_PORT: int = 8000
     APP_DEBUG: bool = True
     LOG_LEVEL: str = "INFO"
+    # Empty means stdout-only, which is safe for read-only containers. Operators
+    # may opt in with a writable absolute path such as /tmp/zhixiao-api.log.
+    LOG_FILE: str = ""
 
     # MySQL
     MYSQL_HOST: str
@@ -76,7 +79,7 @@ class Settings(BaseSettings):
     WORKER_CALLBACK_TOKEN: str = ""
 
     # CORS
-    CORS_ORIGINS: Union[str, List[str]] = "http://localhost:5173"
+    CORS_ORIGINS: str | list[str] = "http://localhost:5173"
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

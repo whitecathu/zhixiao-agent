@@ -4,6 +4,7 @@
 
 import logging
 import sys
+
 from loguru import logger
 
 from app.core.config import settings
@@ -37,15 +38,16 @@ def setup_logging() -> None:
     logger.configure(extra={"trace_id": "-"})
 
     logger.add(sys.stdout, format=fmt, level=settings.LOG_LEVEL, enqueue=True)
-    logger.add(
-        "logs/app_{time:YYYYMMDD}.log",
-        rotation="00:00",
-        retention="14 days",
-        level=settings.LOG_LEVEL,
-        format=fmt,
-        enqueue=True,
-        encoding="utf-8",
-    )
+    if settings.LOG_FILE:
+        logger.add(
+            settings.LOG_FILE,
+            rotation="00:00",
+            retention="14 days",
+            level=settings.LOG_LEVEL,
+            format=fmt,
+            enqueue=True,
+            encoding="utf-8",
+        )
     # 第三方库日志 -> loguru
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "fastapi", "sqlalchemy"):
         logging.getLogger(name).handlers = [InterceptHandler()]
