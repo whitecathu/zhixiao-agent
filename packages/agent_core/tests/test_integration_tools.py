@@ -82,7 +82,14 @@ async def test_background_command_can_be_observed(tmp_path: Path) -> None:
     started = await tool.execute(
         {"action": "start", "command": "python -c print(42)", "timeout": 10}, full
     )
-    await asyncio.sleep(0.2)
-    status = await tool.execute({"action": "status", "job_id": started.data["job_id"]}, full)
+    # Process startup on shared CI runners can exceed a fixed sleep. Poll the public
+    # status contract so the test verifies completion without introducing a race.
+    for _ in range(50):
+        status = await tool.execute({"action": "status", "job_id": started.data["job_id"]}, full)
+        if status.data.get("state") != "running":
+            break
+        await asyncio.sleep(0.1)
+    else:
+        pytest.fail("background command did not finish within 5 seconds")
     assert status.status is ToolStatus.SUCCESS
     assert status.data["exit_code"] == 0
