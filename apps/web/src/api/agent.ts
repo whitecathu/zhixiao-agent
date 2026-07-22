@@ -7,11 +7,13 @@ import type {
   FineTuneJob,
   KnowledgeEntity,
   KnowledgeRelation,
+  KnowledgeGraphExploreResult,
   ModelProfile,
   Repository,
   ToolDefinition,
   ToolInvocation,
   WorkflowDefinition,
+  WorkflowReplay,
 } from "@/types";
 
 export interface RepositoryCreate {
@@ -50,6 +52,14 @@ export const workflowApi = {
   list: () => request<WorkflowDefinition[]>({ method: "GET", url: "/workflows" }),
   create: (data: Partial<WorkflowDefinition>) =>
     request<WorkflowDefinition>({ method: "POST", url: "/workflows", data: workflowPayload(data) }),
+  update: (id: number, data: Partial<WorkflowDefinition>) =>
+    request<WorkflowDefinition>({ method: "PUT", url: `/workflows/${id}`, data: workflowPayload(data) }),
+  versions: (id: number) =>
+    request<WorkflowDefinition[]>({ method: "GET", url: `/workflows/${id}/versions` }),
+  publish: (id: number) =>
+    request<WorkflowDefinition>({ method: "POST", url: `/workflows/${id}/publish` }),
+  replay: (runId: number) =>
+    request<WorkflowReplay>({ method: "GET", url: `/task-runs/${runId}/workflow-replay` }),
 };
 
 function agentPayload(data: Partial<AgentDefinition>) {
@@ -93,6 +103,8 @@ export const modelApi = {
 
 export const intelligenceApi = {
   graph: () => request<{ entities: KnowledgeEntity[]; relations: KnowledgeRelation[] }>({ method: "GET", url: "/knowledge/graph" }),
+  exploreGraph: (data: { query?: string; entity_types?: string[]; entity_id?: number; depth?: number; limit?: number }) =>
+    request<KnowledgeGraphExploreResult>({ method: "POST", url: "/knowledge/graph/explore", data }),
   evaluations: () => request<EvaluationRun[]>({ method: "GET", url: "/evaluations" }),
   createEvaluation: (data: { dataset_name: string; model_profile_id?: number }) =>
     request<EvaluationRun>({ method: "POST", url: "/evaluations", data }),

@@ -90,6 +90,17 @@ async def test_approval_enqueues_and_worker_callback_persists_outputs(client, au
         "diff": "diff --git a/app.py b/app.py\n+fixed = True\n",
         "events": [
             {
+                "sequence": 0,
+                "run_id": str(run["id"]),
+                "event": "model_turn",
+                "data": {
+                    "model": "test-model",
+                    "prompt_tokens": 80,
+                    "completion_tokens": 20,
+                    "cost_usd": 0.002,
+                },
+            },
+            {
                 "sequence": 1,
                 "run_id": str(run["id"]),
                 "event": "tool_result",
@@ -126,6 +137,23 @@ async def test_approval_enqueues_and_worker_callback_persists_outputs(client, au
         json=payload,
     )
     assert replayed_callback.status_code == 200
+    completed = (
+        await client.get(f"/api/v1/task-runs/{run['id']}", headers=auth_headers)
+    ).json()["data"]
+    assert completed["verification"]["model_usage"] == {
+        "prompt_tokens": 80,
+        "completion_tokens": 20,
+        "cost_usd": 0.002,
+        "models": [
+            {
+                "provider": "deepseek",
+                "model": "test-model",
+                "tokens": 100,
+                "cost_usd": 0.002,
+                "calls": 1,
+            }
+        ],
+    }
 
     diff = (await client.get(f"/api/v1/tasks/{run['id']}/diff", headers=auth_headers)).json()[
         "data"

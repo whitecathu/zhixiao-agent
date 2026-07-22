@@ -1,0 +1,57 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "API availability",
+      "gridPos": {"h": 6, "w": 6, "x": 0, "y": 0},
+      "targets": [{"expr": "up{job=\"zhixiao-api\"}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"mappings": [{"options": {"0": {"text": "DOWN"}, "1": {"text": "UP"}}, "type": "value"}]}, "overrides": []}
+    },
+    {
+      "type": "stat",
+      "title": "Task success rate (30m)",
+      "gridPos": {"h": 6, "w": 6, "x": 6, "y": 0},
+      "targets": [{"expr": "sum(rate(zhixiao_task_runs_completed_total{status=\"succeeded\"}[30m])) / clamp_min(sum(rate(zhixiao_task_runs_completed_total{status=~\"succeeded|failed\"}[30m])), 0.001)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}, "overrides": []}
+    },
+    {
+      "type": "stat",
+      "title": "Task p95 duration (30m)",
+      "gridPos": {"h": 6, "w": 6, "x": 12, "y": 0},
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le) (rate(zhixiao_task_run_duration_seconds_bucket[30m])))", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}
+    },
+    {
+      "type": "stat",
+      "title": "Task queue depth",
+      "gridPos": {"h": 6, "w": 6, "x": 18, "y": 0},
+      "targets": [{"expr": "zhixiao_queue_depth{queue=\"task_runs\"}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "title": "API request rate",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 6},
+      "targets": [{"expr": "sum by (status_class) (rate(zhixiao_api_requests_total[5m]))", "legendFormat": "{{status_class}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "title": "Tool invocation rate",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 6},
+      "targets": [{"expr": "sum by (category, status) (rate(zhixiao_tool_invocations_total[5m]))", "legendFormat": "{{category}} {{status}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []}
+    }
+  ],
+  "schemaVersion": 41,
+  "tags": ["zhixiao", "slo"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "timezone": "browser",
+  "title": "Zhixiao Agent Overview",
+  "uid": "zhixiao-overview",
+  "version": 1
+}

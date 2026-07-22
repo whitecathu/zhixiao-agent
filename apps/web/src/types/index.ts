@@ -55,6 +55,7 @@ export interface TaskItem {
   user_id: number;
   repository_id: number;
   workflow_id?: number | null;
+  workflow_version?: number | null;
   agent_id?: number | null;
   title: string;
   prompt: string;
@@ -166,12 +167,45 @@ export interface WorkflowDefinition {
   name: string;
   version: number;
   enabled: boolean;
+  status?: "draft" | "published" | "archived";
+  published_at?: string | null;
   definition: {
-    nodes: Array<{ id: string; role: string; label: string }>;
-    edges: Array<{ source: string; target: string; condition?: string }>;
+    nodes: WorkflowNodeDefinition[];
+    edges: WorkflowEdgeDefinition[];
   };
   created_at: string;
   updated_at: string;
+}
+
+export interface WorkflowNodeDefinition {
+  id: string;
+  role: string;
+  label: string;
+  position?: { x: number; y: number };
+  tool_allowlist?: string[];
+  retry_limit?: number;
+  approval_required?: boolean;
+}
+
+export interface WorkflowEdgeDefinition {
+  id?: string;
+  source: string;
+  target: string;
+  condition?: "success" | "failure" | "always" | string;
+}
+
+export interface WorkflowReplay {
+  task_run_id: number;
+  workflow: {
+    id: number;
+    name: string;
+    version: number | null;
+    definition: WorkflowDefinition["definition"];
+  } | null;
+  steps: Array<{
+    id: number; sequence: number; role: string; name: string; status: string;
+    output?: Record<string, unknown> | null; error_message?: string | null;
+  }>;
 }
 
 export interface AgentDefinition {
@@ -254,6 +288,66 @@ export interface KnowledgeRelation {
   evidence: Array<Record<string, unknown>>;
   created_at: string;
   updated_at: string;
+}
+
+export interface KnowledgeGraphExploreResult {
+  entities: KnowledgeEntity[];
+  relations: KnowledgeRelation[];
+  truncated?: boolean;
+  retrieval_mode?: "relational_graph" | "graph" | "hybrid" | "fallback";
+  evidence_chain?: Array<Record<string, unknown>>;
+  evidence_sufficient?: boolean;
+  evidence_status?: string;
+}
+
+export interface OnboardingStep {
+  id: string;
+  label: string;
+  completed: boolean;
+}
+
+export interface OnboardingState {
+  steps: OnboardingStep[];
+  completed_steps: string[];
+  skipped: boolean;
+  finished: boolean;
+  current_step: string | null;
+  replay_count: number;
+}
+
+export interface OnboardingConfig {
+  space_id: number;
+  recommended_template: string | null;
+  default_workflow_id: number | null;
+}
+
+export interface ObservabilitySummary {
+  generated_at: string;
+  window: string;
+  slo: {
+    task_success_rate: number;
+    first_pass_rate: number;
+    p95_run_duration_ms: number;
+    error_rate: number;
+    cost_usd: number | null;
+    budget_usd: number;
+  };
+  window_days: number;
+  tasks: {
+    total: number; active: number; queued: number; succeeded: number; failed: number;
+    running: number; awaiting_approval: number; success_rate: number;
+    first_pass_rate: number; p95_duration_seconds: number;
+  };
+  queue: { depth: number; oldest_age_seconds: number };
+  queue_backlog: number;
+  tools: {
+    total: number; succeeded: number; failed: number; blocked: number; success_rate: number;
+    average_duration_seconds: number; invocations: number; failure_rate: number; p95_duration_ms: number;
+  };
+  approvals: { pending: number; decided: number; average_wait_seconds: number; p95_wait_seconds: number };
+  model_usage: { prompt_tokens: number; completion_tokens: number; cost_usd: number | null };
+  models: Array<{ provider: string; model: string; tokens: number; cost_usd: number | null; calls: number }>;
+  recent_failures: Array<{ run_id: number; title: string; error: string; occurred_at: string }>;
 }
 
 // ---- 知识 ----

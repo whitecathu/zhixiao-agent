@@ -3,19 +3,27 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar
 
-from pydantic import BaseModel
-from sqlalchemy import func, select
+from pydantic import BaseModel, ValidationError
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.error_codes import ErrorCode
 from app.core.events import EventBroker
 from app.core.exceptions import BizException
 from app.core.jobs import RunJob, RunQueue
+from app.core.metrics import (
+    record_approval,
+    record_model_usage,
+    record_task_run,
+    record_tool_invocation,
+)
 from app.model.base import Base
 from app.model.knowledge import ToolInvocation
 from app.model.platform import (
@@ -30,12 +38,20 @@ from app.model.platform import (
     WorkflowDefinition,
     Workspace,
 )
+from app.model.user import SpaceMember
 from app.schema.platform import (
     AgentUpdate,
     ApprovalDecision,
+    KnowledgeEntityOut,
+    KnowledgeEvidenceLink,
+    KnowledgeGraphExplore,
+    KnowledgeGraphExploreOut,
+    KnowledgeRelationOut,
     ModelProfileUpdate,
     TaskRunCreate,
     WorkerRunResult,
+    WorkflowCreate,
+    WorkflowDSL,
     WorkflowUpdate,
 )
 
@@ -70,6 +86,22 @@ class PlatformService:
         await self.session.commit()
         await self.session.refresh(obj)
         return obj
+
+    async def require_space_admin(self, space_id: int, user_id: int) -> None:
+        member = await self.require_space_member(space_id, user_id)
+        if member.role not in {"space_admin", "super_admin"}:
+            raise BizException(ErrorCode.AUTH_PERMISSION_DENIED, http_status=403)
+
+    async def require_space_member(self, space_id: int, user_id: int) -> SpaceMember:
+        member = await self.session.scalar(
+            select(SpaceMember).where(
+                SpaceMember.space_id == space_id,
+                SpaceMember.user_id == user_id,
+            )
+        )
+        if member is None:
+            raise BizException(ErrorCode.AUTH_PERMISSION_DENIED, http_status=403)
+        return member
 
     async def list_scoped(self, model: type[ModelT], space_id: int) -> list[ModelT]:
         result = await self.session.execute(
@@ -141,11 +173,45 @@ class PlatformService:
         )
         return repository
 
-    async def update_workflow(
-        self, workflow_id: int, space_id: int, payload: WorkflowUpdate
+    async def create_workflow(
+        self, space_id: int, user_id: int, payload: WorkflowCreate
     ) -> WorkflowDefinition:
+        await self.require_space_admin(space_id, user_id)
+        if payload.version != 1:
+            raise BizException(
+                ErrorCode.PARAM_INVALID,
+                message="新工作流必须从版本 1 开始",
+                http_status=422,
+            )
+        duplicate = await self.session.scalar(
+            select(WorkflowDefinition.id).where(
+                WorkflowDefinition.space_id == space_id,
+                WorkflowDefinition.name == payload.name,
+                WorkflowDefinition.deleted_at.is_(None),
+            )
+        )
+        if duplicate is not None:
+            raise BizException(
+                ErrorCode.PARAM_INVALID,
+                message="同名工作流已存在",
+                http_status=409,
+            )
+        data = payload.model_dump(mode="json")
+        data["status"] = "draft"
+        return await self.create_scoped(WorkflowDefinition, space_id, data)
+
+    async def update_workflow(
+        self, workflow_id: int, space_id: int, user_id: int, payload: WorkflowUpdate
+    ) -> WorkflowDefinition:
+        await self.require_space_admin(space_id, user_id)
         current = await self.get_scoped(WorkflowDefinition, workflow_id, space_id)
-        name = payload.name or current.name
+        if payload.name is not None and payload.name != current.name:
+            raise BizException(
+                ErrorCode.PARAM_INVALID,
+                message="版本化工作流不能改名；请新建工作流",
+                http_status=422,
+            )
+        name = current.name
         max_version_result = await self.session.execute(
             select(func.max(WorkflowDefinition.version)).where(
                 WorkflowDefinition.space_id == space_id,
@@ -158,13 +224,75 @@ class PlatformService:
             space_id=space_id,
             name=name,
             version=next_version,
-            definition=payload.definition or current.definition,
+            definition=(
+                payload.definition.model_dump(mode="json")
+                if payload.definition is not None
+                else current.definition
+            ),
             enabled=current.enabled if payload.enabled is None else payload.enabled,
+            status="draft",
         )
         self.session.add(item)
         await self.session.commit()
         await self.session.refresh(item)
         return item
+
+    async def list_workflow_versions(
+        self, workflow_id: int, space_id: int
+    ) -> list[WorkflowDefinition]:
+        current = await self.get_scoped(WorkflowDefinition, workflow_id, space_id)
+        result = await self.session.execute(
+            select(WorkflowDefinition)
+            .where(
+                WorkflowDefinition.space_id == space_id,
+                WorkflowDefinition.name == current.name,
+                WorkflowDefinition.deleted_at.is_(None),
+            )
+            .order_by(WorkflowDefinition.version.desc())
+        )
+        return list(result.scalars().all())
+
+    async def publish_workflow(
+        self, workflow_id: int, space_id: int, user_id: int
+    ) -> WorkflowDefinition:
+        await self.require_space_admin(space_id, user_id)
+        workflow = await self.get_scoped(WorkflowDefinition, workflow_id, space_id)
+        if workflow.status != "draft":
+            raise BizException(
+                ErrorCode.TASK_STATE_INVALID,
+                message="只有草稿工作流可以发布",
+                http_status=409,
+            )
+        if not workflow.enabled:
+            raise BizException(
+                ErrorCode.PARAM_INVALID,
+                message="禁用的工作流不能发布",
+                http_status=422,
+            )
+        try:
+            WorkflowDSL.model_validate(workflow.definition)
+        except ValidationError as exc:
+            raise BizException(
+                ErrorCode.PARAM_INVALID,
+                message="工作流定义无效，无法发布",
+                http_status=422,
+            ) from exc
+        previous = await self.session.execute(
+            select(WorkflowDefinition).where(
+                WorkflowDefinition.space_id == space_id,
+                WorkflowDefinition.name == workflow.name,
+                WorkflowDefinition.status == "published",
+                WorkflowDefinition.id != workflow.id,
+                WorkflowDefinition.deleted_at.is_(None),
+            )
+        )
+        for item in previous.scalars().all():
+            item.status = "archived"
+        workflow.status = "published"
+        workflow.published_at = utcnow()
+        await self.session.commit()
+        await self.session.refresh(workflow)
+        return workflow
 
     async def update_agent(
         self, agent_id: int, space_id: int, payload: AgentUpdate
@@ -193,8 +321,15 @@ class PlatformService:
 
     async def create_run(self, space_id: int, user_id: int, payload: TaskRunCreate) -> TaskRun:
         repository = await self.get_scoped(Repository, payload.repository_id, space_id)
+        workflow: WorkflowDefinition | None = None
         if payload.workflow_id is not None:
-            await self.get_scoped(WorkflowDefinition, payload.workflow_id, space_id)
+            workflow = await self.get_scoped(WorkflowDefinition, payload.workflow_id, space_id)
+            if workflow.status != "published" or not workflow.enabled:
+                raise BizException(
+                    ErrorCode.TASK_STATE_INVALID,
+                    message="任务只能绑定已发布且启用的工作流版本",
+                    http_status=409,
+                )
         if payload.agent_id is not None:
             await self.get_scoped(AgentDefinition, payload.agent_id, space_id)
 
@@ -202,6 +337,7 @@ class PlatformService:
             space_id=space_id,
             user_id=user_id,
             status="awaiting_approval",
+            workflow_version=workflow.version if workflow is not None else None,
             **payload.model_dump(),
         )
         self.session.add(run)
@@ -313,6 +449,11 @@ class PlatformService:
             run.finished_at = utcnow()
             event_name = "run.cancelled"
         await self.session.commit()
+        if approval.decided_at is not None and approval.created_at is not None:
+            record_approval(
+                approval.status,
+                max((approval.decided_at - approval.created_at).total_seconds(), 0.0),
+            )
         if payload.decision == "approved":
             await self._enqueue_run(run)
         await self.session.refresh(approval)
@@ -385,6 +526,20 @@ class PlatformService:
         test_command = ""
         if repository.settings and isinstance(repository.settings.get("test_command"), str):
             test_command = repository.settings["test_command"]
+        workflow_definition = ""
+        workflow_version = ""
+        if run.workflow_id is not None:
+            workflow = await self.get_scoped(WorkflowDefinition, run.workflow_id, run.space_id)
+            if workflow.status not in {"published", "archived"}:
+                raise BizException(
+                    ErrorCode.TASK_STATE_INVALID,
+                    message="任务绑定的工作流版本尚未发布",
+                    http_status=409,
+                )
+            workflow_definition = json.dumps(
+                workflow.definition, ensure_ascii=False, separators=(",", ":")
+            )
+            workflow_version = str(run.workflow_version or workflow.version)
         try:
             message_id = await self.queue.enqueue(
                 RunJob(
@@ -396,6 +551,8 @@ class PlatformService:
                     default_branch=repository.default_branch,
                     workspace=workspace.root_path if workspace else "",
                     test_command=test_command,
+                    workflow_definition=workflow_definition,
+                    workflow_version=workflow_version,
                     network_approved=str(
                         bool(
                             repository.clone_url and not repository.root_path and workspace is None
@@ -444,12 +601,48 @@ class PlatformService:
         run.diff_text = result.diff
         run.error_message = result.error
         passed = result.status == "succeeded" and result.test_exit_code in {None, 0}
+        model_usage: dict[str, Any] = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "cost_usd": 0.0,
+            "models": [],
+        }
+        model_breakdown: dict[str, dict[str, Any]] = {}
+        has_model_usage = False
+        for event in result.events:
+            if event.get("event") != "model_turn":
+                continue
+            data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            model_usage["prompt_tokens"] += max(int(data.get("prompt_tokens", 0) or 0), 0)
+            model_usage["completion_tokens"] += max(
+                int(data.get("completion_tokens", 0) or 0), 0
+            )
+            model_usage["cost_usd"] += max(float(data.get("cost_usd", 0.0) or 0.0), 0.0)
+            model_name = str(data.get("model", "unknown"))[:255]
+            item = model_breakdown.setdefault(
+                model_name,
+                {
+                    "provider": settings.LLM_PROVIDER[:32],
+                    "model": model_name,
+                    "tokens": 0,
+                    "cost_usd": 0.0,
+                    "calls": 0,
+                },
+            )
+            item["tokens"] += max(int(data.get("prompt_tokens", 0) or 0), 0) + max(
+                int(data.get("completion_tokens", 0) or 0), 0
+            )
+            item["cost_usd"] += max(float(data.get("cost_usd", 0.0) or 0.0), 0.0)
+            item["calls"] += 1
+            has_model_usage = True
+        model_usage["models"] = list(model_breakdown.values())
         run.verification = {
             "callback_applied": True,
             "passed": passed,
             "command": result.test_command,
             "exit_code": result.test_exit_code,
             "summary": result.summary,
+            "model_usage": model_usage if has_model_usage else None,
         }
 
         count_result = await self.session.execute(
@@ -573,6 +766,35 @@ class PlatformService:
             )
         self.session.add_all(artifact_rows)
         await self.session.commit()
+        if run.started_at is not None and run.finished_at is not None:
+            record_task_run(
+                run.status,
+                max((run.finished_at - run.started_at).total_seconds(), 0.0),
+            )
+        for event in result.events:
+            data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            if event.get("event") == "tool_result":
+                structured = data.get("result") if isinstance(data.get("result"), dict) else {}
+                raw_status = str(structured.get("status") or data.get("status", "failed"))
+                status = {
+                    "succeeded": "succeeded",
+                    "success": "succeeded",
+                    "blocked": "blocked",
+                    "warning": "blocked",
+                    "approval_required": "blocked",
+                }.get(raw_status, "failed")
+                record_tool_invocation(
+                    str(data.get("tool", "unknown")),
+                    status,
+                    max(float(data.get("duration_ms", 0) or 0) / 1000, 0.0),
+                )
+            elif event.get("event") == "model_turn":
+                record_model_usage(
+                    settings.LLM_PROVIDER,
+                    prompt_tokens=int(data.get("prompt_tokens", 0) or 0),
+                    completion_tokens=int(data.get("completion_tokens", 0) or 0),
+                    cost_usd=float(data.get("cost_usd", 0.0) or 0.0),
+                )
         await self.session.refresh(run)
         await self.events.publish(
             str(run_id),
@@ -690,6 +912,162 @@ class PlatformService:
         await self.get_scoped(KnowledgeEntity, data["source_entity_id"], space_id)
         await self.get_scoped(KnowledgeEntity, data["target_entity_id"], space_id)
         return await self.create_scoped(KnowledgeRelation, space_id, data)
+
+    async def workflow_replay(self, run_id: int, space_id: int) -> dict[str, Any]:
+        run = await self.get_run(run_id, space_id)
+        if run.workflow_id is None:
+            return {"task_run_id": run.id, "workflow": None, "steps": []}
+        workflow = await self.get_scoped(WorkflowDefinition, run.workflow_id, space_id)
+        step_result = await self.session.execute(
+            select(RunStep)
+            .where(RunStep.task_run_id == run.id, RunStep.deleted_at.is_(None))
+            .order_by(RunStep.sequence)
+        )
+        return {
+            "task_run_id": run.id,
+            "workflow": {
+                "id": workflow.id,
+                "name": workflow.name,
+                "version": run.workflow_version,
+                "definition": workflow.definition,
+            },
+            "steps": [
+                {
+                    "id": step.id,
+                    "sequence": step.sequence,
+                    "role": step.role,
+                    "name": step.name,
+                    "status": step.status,
+                    "output": step.output,
+                    "error_message": step.error_message,
+                }
+                for step in step_result.scalars().all()
+            ],
+        }
+
+    async def explore_knowledge_graph(
+        self, space_id: int, user_id: int, payload: KnowledgeGraphExplore
+    ) -> KnowledgeGraphExploreOut:
+        await self.require_space_member(space_id, user_id)
+        truncated = False
+        if payload.entity_id is not None:
+            seeds = [await self.get_scoped(KnowledgeEntity, payload.entity_id, space_id)]
+        else:
+            statement = select(KnowledgeEntity).where(
+                KnowledgeEntity.space_id == space_id,
+                KnowledgeEntity.deleted_at.is_(None),
+            )
+            if payload.query:
+                pattern = f"%{payload.query}%"
+                statement = statement.where(
+                    or_(
+                        KnowledgeEntity.name.ilike(pattern),
+                        KnowledgeEntity.entity_type.ilike(pattern),
+                    )
+                )
+            if payload.entity_types:
+                statement = statement.where(KnowledgeEntity.entity_type.in_(payload.entity_types))
+            result = await self.session.execute(
+                statement.order_by(KnowledgeEntity.id.desc()).limit(payload.limit + 1)
+            )
+            seed_rows = list(result.scalars().all())
+            truncated = len(seed_rows) > payload.limit
+            seeds = seed_rows[: payload.limit]
+
+        entities: dict[int, KnowledgeEntity] = {entity.id: entity for entity in seeds}
+        relations: dict[int, KnowledgeRelation] = {}
+        frontier = set(entities)
+        relation_limit = min(payload.limit * 2, 200)
+        for _ in range(payload.depth):
+            if not frontier or len(relations) >= relation_limit:
+                break
+            result = await self.session.execute(
+                select(KnowledgeRelation)
+                .where(
+                    KnowledgeRelation.space_id == space_id,
+                    KnowledgeRelation.deleted_at.is_(None),
+                    or_(
+                        KnowledgeRelation.source_entity_id.in_(frontier),
+                        KnowledgeRelation.target_entity_id.in_(frontier),
+                    ),
+                )
+                .order_by(KnowledgeRelation.id)
+                .limit(relation_limit - len(relations) + 1)
+            )
+            relation_rows = list(result.scalars().all())
+            if len(relation_rows) > relation_limit - len(relations):
+                truncated = True
+            relation_rows = relation_rows[: relation_limit - len(relations)]
+            candidate_ids = {
+                entity_id
+                for relation in relation_rows
+                for entity_id in (relation.source_entity_id, relation.target_entity_id)
+                if entity_id not in entities
+            }
+            if candidate_ids:
+                entity_result = await self.session.execute(
+                    select(KnowledgeEntity).where(
+                        KnowledgeEntity.space_id == space_id,
+                        KnowledgeEntity.deleted_at.is_(None),
+                        KnowledgeEntity.id.in_(candidate_ids),
+                    )
+                )
+                candidates = list(entity_result.scalars().all())
+            else:
+                candidates = []
+            next_frontier: set[int] = set()
+            for entity in candidates:
+                if len(entities) >= payload.limit:
+                    truncated = True
+                    break
+                entities[entity.id] = entity
+                next_frontier.add(entity.id)
+            for relation in relation_rows:
+                if (
+                    relation.source_entity_id in entities
+                    and relation.target_entity_id in entities
+                ):
+                    relations[relation.id] = relation
+                else:
+                    truncated = True
+            frontier = next_frontier
+
+        evidence_chain = [
+            KnowledgeEvidenceLink(
+                kind="relation",
+                relation_id=relation.id,
+                source_entity_id=relation.source_entity_id,
+                target_entity_id=relation.target_entity_id,
+                relation_type=relation.relation_type,
+                evidence=relation.evidence,
+            )
+            for relation in relations.values()
+            if relation.evidence
+        ]
+        evidence_chain.extend(
+            KnowledgeEvidenceLink(
+                kind="entity",
+                entity_id=entity.id,
+                evidence=entity.source_refs,
+            )
+            for entity in entities.values()
+            if entity.source_refs
+        )
+        if not entities:
+            evidence_status = "no_matches"
+        elif not evidence_chain:
+            evidence_status = "no_source_evidence"
+        else:
+            evidence_status = "sufficient"
+        return KnowledgeGraphExploreOut(
+            entities=[KnowledgeEntityOut.model_validate(item) for item in entities.values()],
+            relations=[KnowledgeRelationOut.model_validate(item) for item in relations.values()],
+            evidence_chain=evidence_chain,
+            evidence_sufficient=evidence_status == "sufficient",
+            evidence_status=evidence_status,
+            truncated=truncated,
+            retrieval_mode="relational_graph",
+        )
 
 
 TOOL_CATALOG = [

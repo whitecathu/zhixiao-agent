@@ -8,6 +8,9 @@ import * as ElIcons from "@element-plus/icons-vue";
 import App from "./App.vue";
 import router from "./router";
 import "@/styles/index.scss";
+import { applyTheme, getPreferredTheme } from "@/utils/theme";
+
+applyTheme(getPreferredTheme());
 
 const app = createApp(App);
 app.use(createPinia());

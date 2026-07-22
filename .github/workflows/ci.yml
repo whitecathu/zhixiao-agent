@@ -103,14 +103,18 @@ jobs:
       - run: docker compose -f infra/docker-compose.yml build api worker web
       - name: Start container smoke stack
         run: |
-          if ! docker compose -f infra/docker-compose.yml up -d mysql redis api web; then
+          if ! docker compose -f infra/docker-compose.yml up -d mysql redis api web prometheus grafana; then
             docker compose -f infra/docker-compose.yml ps -a
-            docker compose -f infra/docker-compose.yml logs --no-color mysql redis api web
+            docker compose -f infra/docker-compose.yml logs --no-color mysql redis api web prometheus grafana
             exit 1
           fi
       - run: |
           for attempt in $(seq 1 30); do
-            curl --fail http://localhost:8000/health && curl --fail http://localhost:5173/health && exit 0
+            curl --fail http://localhost:8000/health \
+              && curl --fail http://localhost:5173/health \
+              && curl --fail http://localhost:3000/api/health \
+              && docker compose -f infra/docker-compose.yml exec -T prometheus wget -qO- http://localhost:9090/-/ready \
+              && exit 0
             sleep 5
           done
           docker compose -f infra/docker-compose.yml logs

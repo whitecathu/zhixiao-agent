@@ -10,10 +10,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import setup_logging
+from app.core.metrics import PrometheusMiddleware
 from app.core.middleware import RateLimitMiddleware, TraceIdMiddleware
-from app.db.session import dispose_engine
 from app.core.redis_client import RedisClient
-from app.router import auth, knowledge, platform, space, sse, stats, task
+from app.db.session import dispose_engine
+from app.router import (
+    auth,
+    knowledge,
+    observability,
+    onboarding,
+    platform,
+    space,
+    sse,
+    stats,
+    task,
+)
 
 
 @asynccontextmanager
@@ -54,6 +65,7 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(RateLimitMiddleware)
     app.add_middleware(TraceIdMiddleware)
+    app.add_middleware(PrometheusMiddleware)
 
     # 路由
     app.include_router(auth.router)
@@ -63,6 +75,8 @@ def create_app() -> FastAPI:
     # Register static platform subpaths (for example /knowledge/graph) before
     # the legacy /knowledge/{knowledge_id} route.
     app.include_router(platform.router)
+    app.include_router(observability.router)
+    app.include_router(onboarding.router)
     app.include_router(knowledge.router)
     app.include_router(stats.router)
 

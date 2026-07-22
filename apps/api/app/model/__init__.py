@@ -1,6 +1,7 @@
 """ORM model exports."""
 
 from app.model.knowledge import ToolInvocation
+from app.model.onboarding import OnboardingState, SpaceOnboardingConfig
 from app.model.platform import (
     AgentDefinition,
     Approval,
@@ -32,4 +33,6 @@ __all__ = [
     "FineTuneJob",
     "KnowledgeEntity",
     "KnowledgeRelation",
+    "OnboardingState",
+    "SpaceOnboardingConfig",
 ]

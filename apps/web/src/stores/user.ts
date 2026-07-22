@@ -2,7 +2,7 @@ import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 
 import { authApi } from "@/api/auth";
-import type { User } from "@/types";
+import type { SpaceMember, User } from "@/types";
 import {
   clearTokens, getAuthToken, getRefreshToken, getSpaceId,
   setSpaceId as saveSpaceId, setTokens, clearSpaceId,
@@ -14,13 +14,19 @@ export const useUserStore = defineStore("user", () => {
   const user = ref<User | null>(null);
   const spaces = ref<Space[]>([]);
   const currentSpaceId = ref<number | null>(getSpaceId());
+  const currentRole = ref<SpaceMember["role"] | null>(null);
   const isLogged = computed(() => !!getAuthToken());
+  const isSpaceAdmin = computed(() => currentRole.value === "space_admin" || currentRole.value === "super_admin");
 
   async function login(username: string, password: string) {
     const data = await authApi.login({ username, password });
     setTokens(data.access_token, data.refresh_token);
     user.value = data.user;
-    await loadSpaces();
+    try {
+      await loadSpaces();
+    } catch {
+      spaces.value = [];
+    }
     if (spaces.value.length && !currentSpaceId.value) {
       switchSpace(spaces.value[0].id);
     }
@@ -32,11 +38,21 @@ export const useUserStore = defineStore("user", () => {
 
   async function loadSpaces() {
     spaces.value = await spaceApi.mine();
+    if (currentSpaceId.value) await loadCurrentRole(currentSpaceId.value);
   }
 
   function switchSpace(id: number) {
     currentSpaceId.value = id;
     saveSpaceId(id);
+    void loadCurrentRole(id);
+  }
+
+  async function loadCurrentRole(spaceId = currentSpaceId.value) {
+    if (!spaceId || !user.value) { currentRole.value = null; return; }
+    try {
+      const members = await spaceApi.listMembers(spaceId);
+      currentRole.value = members.find((member) => member.user_id === user.value?.id)?.role || null;
+    } catch { currentRole.value = null; }
   }
 
   async function logout() {
@@ -49,6 +65,7 @@ export const useUserStore = defineStore("user", () => {
     user.value = null;
     spaces.value = [];
     currentSpaceId.value = null;
+    currentRole.value = null;
   }
 
   async function refreshMe() {
@@ -61,7 +78,7 @@ export const useUserStore = defineStore("user", () => {
   }
 
   return {
-    user, spaces, currentSpaceId, isLogged,
-    login, register, loadSpaces, switchSpace, logout, refreshMe,
+    user, spaces, currentSpaceId, currentRole, isLogged, isSpaceAdmin,
+    login, register, loadSpaces, loadCurrentRole, switchSpace, logout, refreshMe,
   };
 });

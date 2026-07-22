@@ -30,7 +30,8 @@ import TaskTimeline from "@/components/common/TaskTimeline.vue";
 import MarkdownView from "@/components/common/MarkdownView.vue";
 import { useTaskStore } from "@/stores/task";
 import { subscribeTask, type SSEStream } from "@/composables/useSSE";
-import type { Approval, Artifact, TaskStatus } from "@/types";
+import { taskStatusTag, taskStatusText } from "@/utils/status";
+import type { Approval, Artifact } from "@/types";
 
 const route = useRoute(); const taskId = Number(route.params.id); const taskState = useTaskStore(); const loading = ref(false); const connected = ref(false); const tab = ref("output"); const activeSub = ref(""); let sse: SSEStream | null = null;
 const stages = [{ key: "planning", index: "01", label: "计划", hint: "探测与拆解" }, { key: "running", index: "02", label: "实现", hint: "隔离编辑" }, { key: "verifying", index: "03", label: "验证", hint: "测试与修复" }, { key: "reviewing", index: "04", label: "复核", hint: "质量门禁" }, { key: "succeeded", index: "05", label: "交付", hint: "Diff 与知识" }] as const;
@@ -47,8 +48,8 @@ function stageClass(stage: string) {
   const stageIndex = stages.findIndex((item) => item.key === stage);
   return { active: stageIndex === progress, done: current === "succeeded" || stageIndex < progress };
 }
-function statusTag(status?: TaskStatus) { return status === "succeeded" ? "success" : status === "failed" ? "danger" : status === "awaiting_approval" ? "warning" : "primary"; }
-function statusText(status?: TaskStatus) { return ({ awaiting_approval: "待审批", queued: "排队中", running: "执行中", succeeded: "已完成", failed: "失败", interrupted: "已中断", cancelled: "已取消" } as const)[status || "awaiting_approval"]; }
+function statusTag(status?: string) { return taskStatusTag(status); }
+function statusText(status?: string) { return taskStatusText(status); }
 function artifactIcon(kind: Artifact["kind"]) { return ({ diff: "±", test_report: "✓", log: ">_", dataset: "▦", adapter: "◎", report: "▤", other: "◇" } as const)[kind]; }
 async function refresh() { loading.value = true; try { await Promise.all([taskState.load(taskId), taskState.loadRunDetails(taskId)]); } finally { loading.value = false; } }
 async function decide(id: number, decision: Approval["status"]) { if (decision === "pending") return; await taskState.decideApproval(id, decision); ElMessage.success(decision === "approved" ? "已批准，任务将继续执行" : "已拒绝操作"); }

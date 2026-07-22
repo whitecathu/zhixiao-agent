@@ -15,6 +15,7 @@ const routes: RouteRecordRaw[] = [
     redirect: "/workspace",
     children: [
       { path: "/workspace", name: "Workspace", component: () => import("@/views/Workspace/Workspace.vue"), meta: { title: "工作台" } },
+      { path: "/observability", name: "Observability", component: () => import("@/views/Observability/ObservabilityDashboard.vue"), meta: { title: "运行观测" } },
       { path: "/repositories", name: "Repositories", component: () => import("@/views/Repository/RepositoryList.vue"), meta: { title: "代码仓库" } },
       { path: "/task/:id", name: "TaskExec", component: () => import("@/views/Task/TaskExec.vue"), meta: { title: "任务执行" } },
       { path: "/tasks", name: "TaskList", component: () => import("@/views/Task/TaskList.vue"), meta: { title: "任务列表" } },
@@ -34,14 +35,18 @@ const routes: RouteRecordRaw[] = [
 const router = createRouter({
   history: createWebHistory(),
   routes,
+  scrollBehavior(_to, _from, saved) {
+    if (saved) return saved;
+    return { top: 0 };
+  },
 });
 
 router.beforeEach((to, _from, next) => {
   document.title = (to.meta.title as string) || "智效工坊";
   if (to.meta.public) return next();
   if (!getAuthToken()) return next({ name: "Login", query: { redirect: to.fullPath } });
-  // 业务页强制需要 X-Space-Id（除个人中心外）
-  if (to.name !== "Profile" && !getSpaceId()) return next({ name: "Team" });
+  // 业务页强制需要 X-Space-Id（个人中心和团队页除外）
+  if (!["Profile", "Team"].includes(to.name as string) && !getSpaceId()) return next({ name: "Team" });
   next();
 });
 

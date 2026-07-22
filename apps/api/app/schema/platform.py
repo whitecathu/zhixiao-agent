@@ -76,6 +76,7 @@ class TaskRunOut(ORMOut):
     user_id: int
     repository_id: int
     workflow_id: int | None
+    workflow_version: int | None
     agent_id: int | None
     title: str
     prompt: str
@@ -179,24 +180,137 @@ class ArtifactOut(ORMOut):
     metadata: dict[str, Any] | None = Field(validation_alias="metadata_")
 
 
+WORKFLOW_ROLES = frozenset(
+    {"planner", "explorer", "implementer", "tester", "reviewer", "knowledge"}
+)
+WORKFLOW_TOOLS = frozenset(
+    {
+        "list_directory",
+        "read_file",
+        "grep",
+        "exact_edit",
+        "write_file",
+        "terminal",
+        "run_tests",
+        "git_status",
+        "git_diff",
+        "web_search",
+        "web_fetch",
+        "todo",
+        "background_command",
+        "sub_agent",
+        "knowledge_search",
+        "mcp",
+    }
+)
+
+
+class WorkflowPosition(BaseModel):
+    x: float = Field(ge=-100_000, le=100_000)
+    y: float = Field(ge=-100_000, le=100_000)
+
+
+class WorkflowNode(BaseModel):
+    id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z][A-Za-z0-9_-]*$")
+    role: Literal["planner", "explorer", "implementer", "tester", "reviewer", "knowledge"] = Field(
+        validation_alias=AliasChoices("role", "type")
+    )
+    label: str | None = Field(default=None, min_length=1, max_length=128)
+    position: WorkflowPosition | None = None
+    tool_allowlist: list[str] = Field(default_factory=list, max_length=32)
+    retry_limit: int = Field(
+        default=0,
+        ge=0,
+        le=5,
+        validation_alias=AliasChoices("retry_limit", "retries"),
+    )
+    approval_required: bool = False
+
+    @model_validator(mode="after")
+    def validate_tools(self) -> WorkflowNode:
+        unknown = sorted(set(self.tool_allowlist) - WORKFLOW_TOOLS)
+        if unknown:
+            raise ValueError(f"unknown workflow tools: {', '.join(unknown)}")
+        if len(set(self.tool_allowlist)) != len(self.tool_allowlist):
+            raise ValueError("workflow node tool_allowlist must be unique")
+        return self
+
+
+class WorkflowEdge(BaseModel):
+    source: str = Field(min_length=1, max_length=64)
+    target: str = Field(min_length=1, max_length=64)
+    condition: Literal["always", "success", "failure"] = "always"
+
+
+class WorkflowDSL(BaseModel):
+    schema_version: Literal[1] = 1
+    entrypoint: str | None = Field(default=None, min_length=1, max_length=64)
+    nodes: list[WorkflowNode] = Field(min_length=1, max_length=64)
+    edges: list[WorkflowEdge] = Field(default_factory=list, max_length=256)
+
+    @model_validator(mode="after")
+    def validate_graph(self) -> WorkflowDSL:
+        node_ids = [node.id for node in self.nodes]
+        if len(set(node_ids)) != len(node_ids):
+            raise ValueError("workflow node ids must be unique")
+        known = set(node_ids)
+        entrypoint = self.entrypoint or node_ids[0]
+        if entrypoint not in known:
+            raise ValueError("workflow entrypoint must reference a node")
+        self.entrypoint = entrypoint
+
+        seen_edges: set[tuple[str, str, str]] = set()
+        outgoing: dict[str, list[WorkflowEdge]] = {node_id: [] for node_id in node_ids}
+        incoming: dict[str, int] = {node_id: 0 for node_id in node_ids}
+        for edge in self.edges:
+            if edge.source not in known or edge.target not in known:
+                raise ValueError("workflow edges must reference existing nodes")
+            if edge.source == edge.target:
+                raise ValueError("workflow self-cycles are not allowed")
+            key = (edge.source, edge.target, edge.condition)
+            if key in seen_edges:
+                raise ValueError("workflow edges must be unique")
+            seen_edges.add(key)
+            outgoing[edge.source].append(edge)
+            incoming[edge.target] += 1
+
+        for edges in outgoing.values():
+            conditions = [edge.condition for edge in edges]
+            if len(set(conditions)) != len(conditions):
+                raise ValueError("a node can have at most one edge per condition")
+            if "always" in conditions and len(conditions) > 1:
+                raise ValueError("an always edge cannot be combined with conditional edges")
+
+        pending = [node_id for node_id, degree in incoming.items() if degree == 0]
+        visited: list[str] = []
+        while pending:
+            current = pending.pop()
+            visited.append(current)
+            for edge in outgoing[current]:
+                incoming[edge.target] -= 1
+                if incoming[edge.target] == 0:
+                    pending.append(edge.target)
+        if len(visited) != len(node_ids):
+            raise ValueError("workflow cycles are not allowed")
+
+        reachable = {entrypoint}
+        frontier = [entrypoint]
+        while frontier:
+            current = frontier.pop()
+            for edge in outgoing[current]:
+                if edge.target not in reachable:
+                    reachable.add(edge.target)
+                    frontier.append(edge.target)
+        if reachable != known:
+            raise ValueError("all workflow nodes must be reachable from the entrypoint")
+        return self
+
+
 class WorkflowCreate(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     version: int = Field(default=1, ge=1)
-    definition: dict[str, Any]
+    definition: WorkflowDSL
     enabled: bool = True
-
-    @model_validator(mode="after")
-    def validate_graph(self) -> WorkflowCreate:
-        nodes = self.definition.get("nodes")
-        edges = self.definition.get("edges")
-        if not isinstance(nodes, list) or not nodes:
-            raise ValueError("definition.nodes must be a non-empty list")
-        if not isinstance(edges, list):
-            raise ValueError("definition.edges must be a list")
-        ids = [node.get("id") for node in nodes if isinstance(node, dict)]
-        if len(ids) != len(nodes) or len(set(ids)) != len(ids) or any(not item for item in ids):
-            raise ValueError("workflow node ids must be present and unique")
-        return self
 
 
 class WorkflowOut(ORMOut):
@@ -205,11 +319,13 @@ class WorkflowOut(ORMOut):
     version: int
     definition: dict[str, Any]
     enabled: bool
+    status: str
+    published_at: datetime | None
 
 
 class WorkflowUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
-    definition: dict[str, Any] | None = None
+    definition: WorkflowDSL | None = None
     enabled: bool | None = None
 
     @model_validator(mode="after")
@@ -223,6 +339,34 @@ class WorkflowUpdate(BaseModel):
         if not self.model_fields_set:
             raise ValueError("at least one workflow field is required")
         return self
+
+
+class KnowledgeGraphExplore(BaseModel):
+    query: str | None = Field(default=None, min_length=1, max_length=255)
+    entity_types: list[str] = Field(default_factory=list, max_length=16)
+    entity_id: int | None = Field(default=None, ge=1)
+    depth: int = Field(default=1, ge=0, le=3)
+    limit: int = Field(default=50, ge=1, le=100)
+
+
+class KnowledgeEvidenceLink(BaseModel):
+    kind: Literal["entity", "relation"]
+    relation_id: int | None = None
+    entity_id: int | None = None
+    source_entity_id: int | None = None
+    target_entity_id: int | None = None
+    relation_type: str | None = None
+    evidence: list[dict[str, Any]]
+
+
+class KnowledgeGraphExploreOut(BaseModel):
+    entities: list[KnowledgeEntityOut]
+    relations: list[KnowledgeRelationOut]
+    evidence_chain: list[KnowledgeEvidenceLink]
+    evidence_sufficient: bool
+    evidence_status: Literal["sufficient", "no_matches", "no_source_evidence"]
+    truncated: bool
+    retrieval_mode: Literal["relational_graph"] = "relational_graph"
 
 
 class AgentCreate(BaseModel):

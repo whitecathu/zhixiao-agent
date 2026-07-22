@@ -31,6 +31,11 @@ x-app-env: &app-env
   RUNNER_ROOT: /workspace/runs
   COMMAND_TIMEOUT_SECONDS: ${COMMAND_TIMEOUT_SECONDS:-120}
   WORKER_CALLBACK_TOKEN: ${WORKER_CALLBACK_TOKEN:-replace-worker-callback-token}
+  OBSERVABILITY_WINDOW_DAYS: ${OBSERVABILITY_WINDOW_DAYS:-30}
+  SLO_TASK_SUCCESS_RATE_TARGET: ${SLO_TASK_SUCCESS_RATE_TARGET:-0.80}
+  SLO_FIRST_PASS_RATE_TARGET: ${SLO_FIRST_PASS_RATE_TARGET:-0.60}
+  SLO_P95_DURATION_SECONDS_TARGET: ${SLO_P95_DURATION_SECONDS_TARGET:-1800}
+  SLO_MONTHLY_COST_BUDGET_USD: ${SLO_MONTHLY_COST_BUDGET_USD:-50}
 
 services:
   mysql:
@@ -230,6 +235,64 @@ services:
     ports:
       - "${WEB_PORT:-5173}:80"
 
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
+      - --web.enable-lifecycle
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 0.5
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/ready >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change_grafana_me}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SERVER_DOMAIN: ${GRAFANA_DOMAIN:-localhost}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana-dashboards:ro
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 384m
+    cpus: 0.5
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    ports:
+      - "${GRAFANA_BIND_ADDRESS:-127.0.0.1}:${GRAFANA_PORT:-3000}:3000"
+
 volumes:
   mysql_data:
   redis_data:
@@ -240,3 +303,5 @@ volumes:
   neo4j_data:
   workspaces:
   artifacts:
+  prometheus_data:
+  grafana_data:

@@ -24,6 +24,8 @@ class RunJob:
     test_command: str = ""
     approved: str = "true"
     network_approved: str = "false"
+    workflow_definition: str = ""
+    workflow_version: str = ""
 
     def fields(self) -> dict[str, str]:
         return {
@@ -37,6 +39,8 @@ class RunJob:
             "test_command": self.test_command,
             "approved": self.approved,
             "network_approved": self.network_approved,
+            "workflow_definition": self.workflow_definition,
+            "workflow_version": self.workflow_version,
         }
 
 

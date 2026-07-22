@@ -7,8 +7,8 @@
 | 01 | Monorepo、统一执行图、架构与安全边界 | `apps/`、`packages/`、`infra/`、`docs/ARCHITECTURE.md` | Core/API/Web CI | 已实现，CI 待验证 |
 | 02 | 认证、空间、仓库、任务运行、审批、制品、SSE | `apps/api/app/router`、`apps/api/app/model/platform.py`、Alembic 迁移 | `apps/api/tests` | 已实现 |
 | 03 | LangGraph 计划/执行/验证/修复闭环、路由、工具、Skill/指令 | `packages/agent_core/src/zhixiao_agent` | `packages/agent_core/tests` | 已实现 |
-| 04 | Vue 管理台、仓库/任务/Diff/终端/工作流/模型/图谱/评测页面 | `apps/web/src` | ESLint、Vitest、构建、`tests/e2e` | 已实现，容器 E2E 待验证 |
-| 05 | API/Worker/Web 与 MySQL/Redis/Chroma/Milvus/Neo4j 一键编排 | `infra/docker-compose.yml`、Dockerfiles、Nginx | CI 容器冒烟、定时完整编排 | CI 待验证 |
+| 04 | Vue 管理台、上手引导、运行观测、可视化工作流、图谱证据链与运行回放 | `apps/web/src` | ESLint、Vitest、类型检查、构建、`tests/e2e` | 已实现，新增容器 E2E 待验证 |
+| 05 | API/Worker/Web 与 MySQL/Redis/Chroma/Milvus/Neo4j/Prometheus/Grafana 一键编排 | `infra/docker-compose.yml`、`infra/observability`、Dockerfiles、Nginx | Compose 配置、CI 容器冒烟、定时完整编排 | 静态校验通过，容器待验证 |
 | 06 | 向量抽象、双写迁移、图谱融合、数据清洗、LoRA、模型注册和 A/B | `zhixiao_agent/rag`、`zhixiao_agent/training` | RAG/训练单元测试、GPU 工作流 | CPU 链路已实现，GPU/百万级基准待实测 |
 | 07 | 项目指令、Skill、复盘资料与证据约束 | `AGENTS.md`、`skills.py`、`docs/project` | Skill 测试、评测清单校验 | 已实现；量化数据待实测 |
 
@@ -23,6 +23,13 @@
 5. 固定评测清单被校验；真实结果文件覆盖全部场景且制品齐全。
 6. 安全扫描没有高危代码问题，仓库没有密钥、权重、数据集、任务仓库或 worktree。
 7. Web 与 CLI 各完成一次真实跨栈任务，交付的 diff 可应用且测试报告可回放。
+
+## 产品化扩展验收
+
+- 空间管理员能查看不含敏感或高基数标签的运行指标；成员访问观测汇总返回 403，未知模型成本保持 `null`。
+- 上手引导按用户和空间恢复进度，支持完成、跳过和重放；空间配置只允许管理员修改。
+- 非法、未发布或禁用的工作流不能执行；Worker 将已发布 DSL 和版本传给 Agent Core，运行回放保留固化版本。
+- 图谱探索受空间隔离、深度和数量上限约束；无来源证据时明确返回降级状态，不把关系作为回答依据。
 
 ## 评测场景映射
 

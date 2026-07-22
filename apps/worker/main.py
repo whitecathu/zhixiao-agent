@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 import redis.asyncio as redis
+
 from zhixiao_agent.model import ModelProfile, OpenAICompatibleModel
 from zhixiao_agent.runtime import AgentRuntime, RuntimeConfig
 from zhixiao_agent.types import PermissionMode
@@ -205,6 +206,14 @@ async def process_job(client: redis.Redis, runtime: AgentRuntime, job: dict[str,
                 test_command=job.get("test_command") or None,
                 # prepare_workspace already created the per-run worktree/clone.
                 isolate_worktree=False,
+                workflow_definition=(
+                    json.loads(job["workflow_definition"])
+                    if job.get("workflow_definition")
+                    else None
+                ),
+                workflow_version=(
+                    int(job["workflow_version"]) if job.get("workflow_version") else None
+                ),
             ),
             run_id=run_id,
         )

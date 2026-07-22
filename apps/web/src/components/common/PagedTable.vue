@@ -1,6 +1,6 @@
 <template>
   <div class="paged-table">
-    <el-table v-loading="loading" :data="rows" stripe>
+    <el-table v-loading="loading" :data="rows" stripe @row-click="onRowClick">
       <slot />
     </el-table>
     <el-pagination
@@ -24,10 +24,15 @@ defineProps<{
   pageSize: number;
   loading?: boolean;
 }>();
-defineEmits<{
+const emit = defineEmits<{
   "update:page": [value: number];
   "update:pageSize": [value: number];
+  "row-click": [row: any];
 }>();
+
+function onRowClick(row: unknown) {
+  emit("row-click", row);
+}
 </script>
 
 <style scoped lang="scss">

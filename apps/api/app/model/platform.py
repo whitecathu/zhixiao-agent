@@ -7,7 +7,7 @@ from datetime import datetime
 from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.model.base import Base, BigInt, LongText, PKMixin, SAJSON
+from app.model.base import SAJSON, Base, BigInt, LongText, PKMixin
 
 
 class Repository(PKMixin, Base):
@@ -43,6 +43,7 @@ class TaskRun(PKMixin, Base):
         BigInt, ForeignKey("repositories.id"), nullable=False
     )
     workflow_id: Mapped[int | None] = mapped_column(BigInt, ForeignKey("workflow_definitions.id"))
+    workflow_version: Mapped[int | None] = mapped_column(Integer)
     agent_id: Mapped[int | None] = mapped_column(BigInt, ForeignKey("agent_definitions.id"))
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     prompt: Mapped[str] = mapped_column(LongText, nullable=False)
@@ -116,6 +117,8 @@ class WorkflowDefinition(PKMixin, Base):
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     definition: Mapped[dict] = mapped_column(SAJSON, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="draft", nullable=False)
+    published_at: Mapped[datetime | None]
 
     __table_args__ = (UniqueConstraint("space_id", "name", "version", name="uk_workflow_version"),)
 

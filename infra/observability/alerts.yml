@@ -1,0 +1,62 @@
+groups:
+  - name: zhixiao-slo
+    rules:
+      - alert: ZhixiaoApiUnavailable
+        expr: up{job="zhixiao-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Zhixiao API metrics target is unavailable
+
+      - alert: ZhixiaoApiHighErrorRate
+        expr: |
+          sum(rate(zhixiao_api_requests_total{status_class="5xx"}[5m]))
+          /
+          clamp_min(sum(rate(zhixiao_api_requests_total[5m])), 0.001)
+          > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: API 5xx error rate is above 5 percent
+
+      - alert: ZhixiaoTaskSuccessSLOBreach
+        expr: |
+          sum(rate(zhixiao_task_runs_completed_total{status="succeeded"}[30m]))
+          /
+          clamp_min(sum(rate(zhixiao_task_runs_completed_total{status=~"succeeded|failed"}[30m])), 0.001)
+          < 0.80
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Task success rate is below the 80 percent SLO
+
+      - alert: ZhixiaoTaskP95DurationSLOBreach
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(zhixiao_task_run_duration_seconds_bucket[30m]))
+          ) > 1800
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Task p95 duration is above 30 minutes
+
+      - alert: ZhixiaoQueueBacklog
+        expr: zhixiao_queue_depth{queue="task_runs"} > 20
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Task queue backlog is above 20
+
+      - alert: ZhixiaoMonthlyModelCostBudget
+        expr: increase(zhixiao_model_cost_usd_total[30d]) > 50
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Estimated 30-day model cost is above 50 USD

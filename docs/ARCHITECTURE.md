@@ -15,6 +15,8 @@ flowchart LR
   G --> V["Chroma / Milvus"]
   G --> N["Neo4j"]
   G --> M["OpenAI-compatible models"]
+  A --> P["Prometheus"]
+  P --> F["Grafana / SLO alerts"]
   W --> R
   A --> U
 ```
@@ -42,10 +44,10 @@ flowchart TD
 ## 模块职责
 
 - `packages/agent_core`：状态机、任务路由、模型适配、权限、Runner、工具、项目指令、Skill、RAG、训练和 CLI/TUI。
-- `apps/api`：认证、多租户空间、仓库/运行元数据、审批、事件订阅、工作流、Agent、模型、知识图谱和评测 API。
+- `apps/api`：认证、多租户空间、仓库/运行元数据、审批、事件订阅、上手引导、工作流、Agent、模型、知识图谱、评测与观测 API。
 - `apps/worker`：消费任务队列，运行 Agent Core，将事件与结果写回控制面。
 - `apps/web`：操作台和运行可视化，不直接访问数据库或 Runner。
-- `infra`：独立镜像、Compose、Nginx SSE 配置、数据服务和健康检查。
+- `infra`：独立镜像、Compose、Nginx SSE、Prometheus/Grafana、SLO 告警、数据服务和健康检查。
 
 ## 数据与事件
 
@@ -53,7 +55,7 @@ MySQL 是业务记录的事实源；Redis Stream 是运行事件传输层；制�
 
 ## 扩展点
 
-- WorkflowDefinition 是版本化 JSON DSL，可保存节点、边、条件、重试与审批规则。
+- WorkflowDefinition 是版本化 JSON DSL，草稿经管理员发布后才能执行；TaskRun 固化版本，Worker 按 DSL 动态构建 LangGraph 节点、条件、重试、审批与工具白名单。
 - AgentDefinition 保存角色、Prompt 与工具白名单。
 - ToolRegistry 统一类型化输入和 ToolResult 输出。
 - ModelProfile 采用 OpenAI-compatible 协议，路由层负责超时、回退、成本与 A/B 选择。

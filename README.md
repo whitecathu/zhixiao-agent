@@ -4,7 +4,7 @@
 
 ## 产品形态
 
-- Web：团队、仓库、任务、实时事件、计划审批、Diff、工作流、知识与评测管理。
+- Web：团队、仓库、任务、实时事件、计划审批、Diff、可视化工作流、知识图谱、评测与运行观测。
 - CLI/TUI：在本地仓库中交互执行，或以无头模式接入 CI。
 - API/Worker：持久化任务、编排 Agent、执行工具、流式推送事件。
 - Agent Core：LangGraph 工作流、权限、Runner、工具、技能、记忆、模型与评测。
@@ -38,6 +38,7 @@ docker compose -f infra/docker-compose.yml up --build
 ```
 
 Web 默认地址为 `http://localhost:5173`，API 文档为 `http://localhost:8000/docs`。
+Prometheus 与 Grafana 随 Compose 启动，默认仅在内部网络抓取 `/metrics`；空间管理员通过 Web 的“运行观测”查看空间级 SLO。首次进入空间时，上手引导会保存进度，可跳过或重新播放。
 
 开发者可分别验证三个主模块：
 
@@ -66,6 +67,7 @@ python tests/evals/run_scenarios.py --validate-only
 - [API 指南](docs/API.md)
 - [演示脚本](docs/DEMO.md)
 - [评测方法](docs/EVALUATION.md)
+- [可观测性与 SLO](docs/OBSERVABILITY.md)
 - [GOAL-01～07 验收矩阵](docs/ACCEPTANCE.md)
 
 ## 交付原则

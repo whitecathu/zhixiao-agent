@@ -26,6 +26,7 @@ import app.model.user  # noqa: F401,E402
 import app.model.task  # noqa: F401,E402
 import app.model.knowledge  # noqa: F401,E402
 import app.model.platform  # noqa: F401,E402
+import app.model.onboarding  # noqa: F401,E402
 
 
 @pytest_asyncio.fixture

@@ -25,7 +25,11 @@ async def auth_headers(client):
         "password": "Str0ngPwd!",
     })
     token = login.json()["data"]["access_token"]
-    return {"Authorization": f"Bearer {token}", "X-Space-Id": "1"}
+    headers = {"Authorization": f"Bearer {token}"}
+    space = await client.post(
+        "/api/v1/spaces", headers=headers, json={"name": "Platform Test Space"}
+    )
+    return {**headers, "X-Space-Id": str(space.json()["data"]["id"])}
 
 
 @pytest.mark.asyncio

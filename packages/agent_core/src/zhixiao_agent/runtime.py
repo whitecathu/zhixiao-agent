@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Hashable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +28,7 @@ from .types import (
     TaskType,
     ToolStatus,
 )
+from .workflow import WorkflowDefinition, WorkflowNode
 
 
 class AgentState(TypedDict, total=False):
@@ -55,6 +56,8 @@ class AgentState(TypedDict, total=False):
     require_plan_approval: bool
     _had_tool_calls: bool
     source_workspace: str
+    route_allowed_tools: list[str]
+    workflow_node: str
 
 
 @dataclass(frozen=True)
@@ -69,6 +72,8 @@ class RuntimeConfig:
     test_command: str | None = None
     docker_image: str = "python:3.11-slim"
     isolate_worktree: bool = True
+    workflow_definition: dict[str, Any] | None = None
+    workflow_version: int | None = None
 
 
 _SYSTEM_PROMPT = """You are Zhixiao, an auditable software-engineering agent.
@@ -124,12 +129,17 @@ class AgentRuntime:
                 **state,
                 "task_type": task_type.value,
                 "allowed_tools": sorted(route.tools),
+                "route_allowed_tools": sorted(route.tools),
                 "agents": list(route.agents),
                 "status": RunStatus.PLANNING.value,
                 "events": runtime._emit(
                     state,
                     "run_started",
-                    {"task_type": task_type.value, "agents": list(route.agents)},
+                    {
+                        "task_type": task_type.value,
+                        "agents": list(route.agents),
+                        "workflow_version": config.workflow_version,
+                    },
                 ),
             }
 
@@ -293,11 +303,23 @@ class AgentRuntime:
                 tools=runtime.registry.schemas(set(state["allowed_tools"])),
             )
             messages = list(state["messages"])
+            tool_calls_formatted = []
+            for call in turn.tool_calls:
+                tool_calls_formatted.append(
+                    {
+                        "id": call.id,
+                        "type": "function",
+                        "function": {
+                            "name": call.name,
+                            "arguments": json.dumps(call.arguments, ensure_ascii=False),
+                        },
+                    }
+                )
             messages.append(
                 {
                     "role": "assistant",
                     "content": turn.content,
-                    "tool_calls": [call.model_dump() for call in turn.tool_calls],
+                    "tool_calls": tool_calls_formatted,
                 }
             )
             events = runtime._emit(
@@ -471,6 +493,159 @@ class AgentRuntime:
             }
             return result
 
+        if config.workflow_definition is not None:
+            workflow = WorkflowDefinition.model_validate(config.workflow_definition)
+            role_handlers = {
+                "planner": plan,
+                "explorer": discover,
+                "tester": verify,
+            }
+
+            def configured_node(node: WorkflowNode) -> Any:
+                async def invoke(state: AgentState) -> AgentState:
+                    current: AgentState = {
+                        **state,
+                        "workflow_node": node.id,
+                        "events": runtime._emit(
+                            state,
+                            "workflow_node_started",
+                            {"node_id": node.id, "role": node.role},
+                        ),
+                    }
+                    if node.tool_allowlist:
+                        route_tools = set(
+                            current.get("route_allowed_tools", current.get("allowed_tools", []))
+                        )
+                        current["allowed_tools"] = sorted(route_tools & set(node.tool_allowlist))
+                    else:
+                        current["allowed_tools"] = list(
+                            current.get("route_allowed_tools", current.get("allowed_tools", []))
+                        )
+
+                    if node.approval_required and not current.get("approved", False):
+                        decision = interrupt(
+                            {
+                                "kind": "workflow_node",
+                                "run_id": current["run_id"],
+                                "node_id": node.id,
+                                "role": node.role,
+                            }
+                        )
+                        approved = bool(
+                            decision.get("approved", False)
+                            if isinstance(decision, dict)
+                            else decision
+                        )
+                        if not approved:
+                            return {
+                                **current,
+                                "status": RunStatus.INTERRUPTED.value,
+                                "summary": f"Approval denied for workflow node {node.id}.",
+                                "events": runtime._emit(
+                                    current,
+                                    "approval_decided",
+                                    {
+                                        "kind": "workflow_node",
+                                        "node_id": node.id,
+                                        "approved": False,
+                                    },
+                                ),
+                            }
+                        current["approved"] = True
+
+                    handler = role_handlers.get(node.role, execute)
+                    last_error: Exception | None = None
+                    for attempt in range(node.retry_limit + 1):
+                        try:
+                            updated = await handler(current)
+                            if node.role in {"implementer", "reviewer", "knowledge"}:
+                                while (
+                                    updated.get("_had_tool_calls", False)
+                                    and updated.get("iterations", 0) < config.max_tool_iterations
+                                ):
+                                    updated = await execute(updated)
+                        except Exception as exc:
+                            last_error = exc
+                            updated = {
+                                **current,
+                                "error": str(exc),
+                                "status": RunStatus.RUNNING.value,
+                            }
+                        failed = (
+                            bool(updated.get("error"))
+                            if node.role != "tester"
+                            else updated.get("test_exit_code") not in (None, 0)
+                        )
+                        if not failed or attempt >= node.retry_limit:
+                            current = updated
+                            break
+                        current = {
+                            **updated,
+                            "events": runtime._emit(
+                                updated,
+                                "workflow_node_retry",
+                                {
+                                    "node_id": node.id,
+                                    "attempt": attempt + 2,
+                                    "reason": updated.get("error") or "verification failed",
+                                },
+                            ),
+                        }
+                    if last_error is not None and not current.get("error"):
+                        current["error"] = str(last_error)
+                    return {
+                        **current,
+                        "events": runtime._emit(
+                            current,
+                            "workflow_node_finished",
+                            {
+                                "node_id": node.id,
+                                "role": node.role,
+                                "failed": (
+                                    current.get("test_exit_code") not in (None, 0)
+                                    if node.role == "tester"
+                                    else bool(current.get("error"))
+                                ),
+                            },
+                        ),
+                    }
+
+                return invoke
+
+            builder = StateGraph(AgentState)
+            builder.add_node("intake", intake)
+            builder.add_node("prepare_workspace", prepare_workspace)
+            builder.add_node("finalize", finalize)
+            node_names = {node.id: f"workflow_{node.id}" for node in workflow.nodes}
+            node_by_id = {node.id: node for node in workflow.nodes}
+            for node in workflow.nodes:
+                builder.add_node(node_names[node.id], configured_node(node))
+            builder.add_edge(START, "intake")
+            builder.add_edge("intake", "prepare_workspace")
+            builder.add_edge("prepare_workspace", node_names[cast(str, workflow.entrypoint)])
+
+            for node_id, node_name in node_names.items():
+                node = node_by_id[node_id]
+
+                def route(state: AgentState, *, current_node: WorkflowNode = node) -> str:
+                    if state.get("status") == RunStatus.INTERRUPTED.value:
+                        return "__end__"
+                    failed = (
+                        state.get("test_exit_code") not in (None, 0)
+                        if current_node.role == "tester"
+                        else bool(state.get("error"))
+                    )
+                    return workflow.next_node(current_node.id, failed=failed) or "__finalize__"
+
+                path_map: dict[Hashable, str] = {
+                    edge.target: node_names[edge.target] for edge in workflow.outgoing(node_id)
+                }
+                path_map["__finalize__"] = "finalize"
+                path_map["__end__"] = END
+                builder.add_conditional_edges(node_name, route, path_map)
+            builder.add_edge("finalize", END)
+            return builder.compile(checkpointer=checkpointer)
+
         builder = StateGraph(AgentState)
         builder.add_node("intake", intake)
         builder.add_node("discover", discover)
@@ -525,6 +700,8 @@ class AgentRuntime:
             "prompt": prompt,
             "workspace": str(resolved_workspace),
             "source_workspace": str(resolved_workspace),
+            "route_allowed_tools": [],
+            "workflow_node": "",
             "permission": runtime_config.permission.value,
             "events": [],
             "artifacts": [],

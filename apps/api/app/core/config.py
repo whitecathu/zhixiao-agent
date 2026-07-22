@@ -77,6 +77,7 @@ class Settings(BaseSettings):
     AI_ENGINE_BASE_URL: str = "http://localhost:8001"
     AI_ENGINE_TIMEOUT: int = 120
     WORKER_CALLBACK_TOKEN: str = ""
+    LLM_PROVIDER: str = "deepseek"
 
     # CORS
     CORS_ORIGINS: str | list[str] = "http://localhost:5173"
@@ -91,6 +92,13 @@ class Settings(BaseSettings):
     # 业务
     REVIEW_MAX_ROUNDS: int = 2
     TASK_TOTAL_TIMEOUT_SEC: int = 1800  # 30min
+
+    # 可观测性与 SLO。这里只保存聚合阈值，不接受用户、仓库或提示词作为标签。
+    OBSERVABILITY_WINDOW_DAYS: int = Field(30, ge=1, le=365)
+    SLO_TASK_SUCCESS_RATE_TARGET: float = Field(0.80, ge=0, le=1)
+    SLO_FIRST_PASS_RATE_TARGET: float = Field(0.60, ge=0, le=1)
+    SLO_P95_DURATION_SECONDS_TARGET: float = Field(1800.0, gt=0)
+    SLO_MONTHLY_COST_BUDGET_USD: float = Field(50.0, ge=0)
 
 
 @lru_cache

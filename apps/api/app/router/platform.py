@@ -23,7 +23,6 @@ from app.model.platform import (
     EvaluationRun,
     FineTuneJob,
     KnowledgeEntity,
-    KnowledgeRelation,
     ModelProfile,
     WorkflowDefinition,
 )
@@ -42,6 +41,8 @@ from app.schema.platform import (
     FineTuneOut,
     KnowledgeEntityCreate,
     KnowledgeEntityOut,
+    KnowledgeGraphExplore,
+    KnowledgeGraphExploreOut,
     KnowledgeRelationCreate,
     KnowledgeRelationOut,
     ModelProfileCreate,
@@ -209,6 +210,16 @@ async def get_task_run(
 ):
     run = await svc.get_run(run_id, space_id)
     return success(TaskRunOut.model_validate(run).model_dump())
+
+
+@router.get("/task-runs/{run_id}/workflow-replay")
+async def get_workflow_replay(
+    run_id: int,
+    user=Depends(get_current_user),
+    space_id: int = Depends(get_space_id),
+    svc: PlatformService = Depends(service),
+):
+    return success(await svc.workflow_replay(run_id, space_id))
 
 
 async def _interrupt(run_id: int, space_id: int, svc: PlatformService) -> ApiResponse:
@@ -464,7 +475,7 @@ async def create_workflow(
     space_id: int = Depends(get_space_id),
     svc: PlatformService = Depends(service),
 ):
-    item = await svc.create_scoped(WorkflowDefinition, space_id, payload)
+    item = await svc.create_workflow(space_id, user["user_id"], payload)
     return success(WorkflowOut.model_validate(item).model_dump())
 
 
@@ -474,6 +485,7 @@ async def list_workflows(
     space_id: int = Depends(get_space_id),
     svc: PlatformService = Depends(service),
 ):
+    await svc.require_space_member(space_id, user["user_id"])
     items = await svc.list_scoped(WorkflowDefinition, space_id)
     return success([WorkflowOut.model_validate(item).model_dump() for item in items])
 
@@ -486,7 +498,30 @@ async def update_workflow(
     space_id: int = Depends(get_space_id),
     svc: PlatformService = Depends(service),
 ):
-    item = await svc.update_workflow(workflow_id, space_id, payload)
+    item = await svc.update_workflow(workflow_id, space_id, user["user_id"], payload)
+    return success(WorkflowOut.model_validate(item).model_dump())
+
+
+@router.get("/workflows/{workflow_id}/versions")
+async def list_workflow_versions(
+    workflow_id: int,
+    user=Depends(get_current_user),
+    space_id: int = Depends(get_space_id),
+    svc: PlatformService = Depends(service),
+):
+    await svc.require_space_member(space_id, user["user_id"])
+    items = await svc.list_workflow_versions(workflow_id, space_id)
+    return success([WorkflowOut.model_validate(item).model_dump() for item in items])
+
+
+@router.post("/workflows/{workflow_id}/publish")
+async def publish_workflow(
+    workflow_id: int,
+    user=Depends(get_current_user),
+    space_id: int = Depends(get_space_id),
+    svc: PlatformService = Depends(service),
+):
+    item = await svc.publish_workflow(workflow_id, space_id, user["user_id"])
     return success(WorkflowOut.model_validate(item).model_dump())
 
 
@@ -612,6 +647,7 @@ async def create_entity(
     space_id: int = Depends(get_space_id),
     svc: PlatformService = Depends(service),
 ):
+    await svc.require_space_member(space_id, user["user_id"])
     item = await svc.create_scoped(KnowledgeEntity, space_id, payload)
     return success(KnowledgeEntityOut.model_validate(item).model_dump())
 
@@ -623,6 +659,7 @@ async def create_relation(
     space_id: int = Depends(get_space_id),
     svc: PlatformService = Depends(service),
 ):
+    await svc.require_space_member(space_id, user["user_id"])
     item = await svc.create_relation(space_id, payload)
     return success(KnowledgeRelationOut.model_validate(item).model_dump())
 
@@ -633,13 +670,23 @@ async def get_knowledge_graph(
     space_id: int = Depends(get_space_id),
     svc: PlatformService = Depends(service),
 ):
-    entities = await svc.list_scoped(KnowledgeEntity, space_id)
-    relations = await svc.list_scoped(KnowledgeRelation, space_id)
+    graph = await svc.explore_knowledge_graph(
+        space_id, user["user_id"], KnowledgeGraphExplore(limit=100, depth=1)
+    )
     return success(
         {
-            "entities": [KnowledgeEntityOut.model_validate(item).model_dump() for item in entities],
-            "relations": [
-                KnowledgeRelationOut.model_validate(item).model_dump() for item in relations
-            ],
+            "entities": [item.model_dump() for item in graph.entities],
+            "relations": [item.model_dump() for item in graph.relations],
         }
     )
+
+
+@router.post("/knowledge/graph/explore")
+async def explore_knowledge_graph(
+    payload: KnowledgeGraphExplore,
+    user=Depends(get_current_user),
+    space_id: int = Depends(get_space_id),
+    svc: PlatformService = Depends(service),
+):
+    graph = await svc.explore_knowledge_graph(space_id, user["user_id"], payload)
+    return success(KnowledgeGraphExploreOut.model_validate(graph).model_dump())

@@ -135,7 +135,7 @@ test("login, repository registration, TaskRun approval and delivery evidence", a
   await page.getByPlaceholder("密码").first().fill("Passw0rd!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await expect(page).toHaveURL(/\/workspace$/);
-  await expect(page.getByText("E2E 空间")).toBeVisible();
+  await expect(page.getByRole("button", { name: "E2E 空间", exact: true })).toBeVisible();
 
   await page.getByRole("menuitem", { name: "代码仓库" }).click();
   await page.getByRole("button", { name: "接入仓库" }).click();

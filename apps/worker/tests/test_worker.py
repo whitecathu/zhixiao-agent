@@ -88,3 +88,57 @@ async def test_prepare_workspace_rejects_unapproved_network_clone(tmp_path, monk
                 "network_approved": "false",
             }
         )
+
+
+@pytest.mark.asyncio
+async def test_process_job_supports_legacy_and_versioned_workflow_config(tmp_path, monkeypatch):
+    client = FakeRedis()
+    captured = []
+
+    class Result:
+        def model_dump(self, **kwargs):
+            return {
+                "run_id": "3",
+                "status": "succeeded",
+                "summary": "done",
+                "events": [],
+            }
+
+    class Runtime:
+        async def run(self, prompt, workspace, config, *, run_id):
+            captured.append(config)
+            return Result()
+
+    async def fake_post(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(worker, "post_result", fake_post)
+    await worker.process_job(
+        client,
+        Runtime(),
+        {
+            "run_id": "3",
+            "prompt": "legacy job",
+            "permission_mode": "read_only",
+            "workspace": str(tmp_path),
+        },
+    )
+
+    assert captured[0].workflow_definition is None
+    assert captured[0].workflow_version is None
+
+    workflow = {"nodes": [{"id": "review", "role": "reviewer"}], "edges": []}
+    await worker.process_job(
+        client,
+        Runtime(),
+        {
+            "run_id": "4",
+            "prompt": "versioned job",
+            "permission_mode": "read_only",
+            "workspace": str(tmp_path),
+            "workflow_definition": json.dumps(workflow),
+            "workflow_version": "3",
+        },
+    )
+    assert captured[1].workflow_definition == workflow
+    assert captured[1].workflow_version == 3
