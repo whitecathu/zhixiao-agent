@@ -2,7 +2,7 @@
  * SSE 客户端 - 使用 fetch + ReadableStream 解析，便于携带 Authorization Header
  * EventSource 不支持自定义 Header，因此不用原生 EventSource
  */
-import { getAuthToken } from "@/utils/auth";
+import { getAuthToken, getSpaceId } from "@/utils/auth";
 import type { SSEPayload } from "@/types";
 
 export interface SSEHandlers {
@@ -36,6 +36,8 @@ export function subscribeTask(taskId: number, handlers: SSEHandlers, options: SS
           Authorization: token ? `Bearer ${token}` : "",
           Accept: "text/event-stream",
         };
+        const spaceId = getSpaceId();
+        if (spaceId != null) headers["X-Space-Id"] = String(spaceId);
         if (lastEventId) headers["Last-Event-ID"] = lastEventId;
         const resp = await fetch(url, { method: "GET", headers, signal: controller.signal });
         if (!resp.ok || !resp.body) throw new Error(`SSE ${resp.status}`);

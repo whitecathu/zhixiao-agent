@@ -8,6 +8,7 @@ version = "1.0.0"
 description = "FastAPI control plane for the Zhixiao engineering agent"
 requires-python = ">=3.11,<3.13"
 dependencies = [
+    "zhixiao-agent",
     "fastapi>=0.116,<1",
     "uvicorn[standard]>=0.27,<0.28",
     "pydantic>=2.11,<3",
@@ -26,6 +27,9 @@ dependencies = [
     "prometheus-client>=0.21,<1",
 ]
 
+[tool.uv.sources]
+zhixiao-agent = { workspace = true }
+
 [project.optional-dependencies]
 test = [
     "aiosqlite>=0.20,<0.21",
@@ -33,6 +37,8 @@ test = [
     "pytest>=8,<9",
     "pytest-asyncio>=0.23,<0.24",
     "pytest-cov>=5,<6",
+    "ruff>=0.6,<1",
+    "mypy>=1.11,<2",
 ]
 
 [project.scripts]

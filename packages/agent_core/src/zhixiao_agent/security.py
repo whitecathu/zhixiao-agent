@@ -44,6 +44,14 @@ _PUBLISH = re.compile(
 )
 
 
+def required_command_capability(command: str) -> str | None:
+    if _PUBLISH.search(command):
+        return "git_publish"
+    if _DESTRUCTIVE.search(command):
+        return "destructive_command"
+    return None
+
+
 class CommandPolicy:
     def validate(self, command: str, permission: PermissionMode, *, approved: bool = False) -> None:
         if permission not in {PermissionMode.EXECUTE, PermissionMode.FULL}:

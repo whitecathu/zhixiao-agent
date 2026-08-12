@@ -21,15 +21,18 @@
 
 .not-found-card {
   width: min(520px, 100%);
-  padding: 36px;
+  padding: 40px 36px;
   background: var(--surface);
   border: 1px solid var(--border);
   text-align: center;
+  box-shadow: var(--shadow-sm);
+  animation: rise 0.22s ease;
 }
 
 .not-found-card h1 {
   margin: 8px 0 10px;
   font-size: 32px;
+  letter-spacing: -0.8px;
 }
 
 .actions {
@@ -37,5 +40,23 @@
   justify-content: center;
   gap: 10px;
   margin-top: 24px;
+  flex-wrap: wrap;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .not-found-card {
+    animation: none;
+  }
 }
 </style>

@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import ipaddress
 import json
 import re
+import shlex
+import socket
 import uuid
 from collections.abc import Callable
 from typing import Any, ClassVar
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 from pydantic import BaseModel, Field, HttpUrl
@@ -29,11 +33,11 @@ class WebSearchTool(BaseTool):
     async def execute(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
         try:
             request = self.validate(arguments)
-            if context.permission is not PermissionMode.FULL or not context.approved:
+            if context.permission is not PermissionMode.FULL or not context.allows_network("web"):
                 return ToolResult.blocked(
                     "web search requires approval",
                     root_cause="network access is restricted",
-                    retry="approve the network operation and use full permission",
+                    retry="approve network_tools and use full permission",
                 )
             handler = context.metadata.get("web_search")
             if callable(handler):
@@ -75,19 +79,35 @@ class WebFetchTool(BaseTool):
     name = "web_fetch"
     description = "Fetch a public HTTP page with a strict response-size limit."
     input_model = WebFetchInput
+    _MAX_REDIRECTS = 5
 
     async def execute(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
         request = self.validate(arguments)
-        if context.permission is not PermissionMode.FULL or not context.approved:
+        if context.permission is not PermissionMode.FULL or not context.allows_network("web"):
             return ToolResult.blocked(
                 "web fetch requires approval",
                 root_cause="network access is restricted",
-                retry="approve the URL fetch and use full permission",
+                retry="approve network_tools and use full permission",
             )
         try:
-            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-                response = await client.get(str(request.url))
-                response.raise_for_status()
+            current_url = str(request.url)
+            async with httpx.AsyncClient(
+                timeout=20,
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                for redirect_count in range(self._MAX_REDIRECTS + 1):
+                    await _validate_public_http_url(current_url)
+                    response = await client.get(current_url)
+                    if not response.is_redirect:
+                        response.raise_for_status()
+                        break
+                    location = response.headers.get("location")
+                    if not location:
+                        raise UnsafeWebFetchURL("redirect response is missing a Location header")
+                    if redirect_count >= self._MAX_REDIRECTS:
+                        raise UnsafeWebFetchURL("web fetch exceeded the redirect limit")
+                    current_url = urljoin(str(response.url), location)
             content = response.text[: request.max_chars]
             return ToolResult.ok(
                 f"fetched {len(content)} characters",
@@ -96,6 +116,12 @@ class WebFetchTool(BaseTool):
                     "content_type": response.headers.get("content-type"),
                     "content": content,
                 },
+            )
+        except UnsafeWebFetchURL as exc:
+            return ToolResult.blocked(
+                "web fetch URL is not allowed",
+                root_cause=str(exc),
+                retry="use a public HTTP or HTTPS URL without credentials",
             )
         except httpx.HTTPError as exc:
             return ToolResult.error("web fetch failed", root_cause=str(exc), retry="verify the URL")
@@ -121,16 +147,24 @@ class BackgroundCommandTool(BaseTool):
                 return ToolResult.error("command is required", root_cause="missing command")
             try:
                 # Validate now so rejected jobs never enter the table.
+                from ..security import required_command_capability
+
+                capability = required_command_capability(request.command)
+                approved = capability is None or context.allows(capability)
                 policy = getattr(context.runner, "policy", None)
                 if policy is not None:
-                    policy.validate(request.command, context.permission, approved=context.approved)
+                    policy.validate(
+                        request.command,
+                        context.permission,
+                        approved=approved,
+                    )
                 job_id = uuid.uuid4().hex
                 self._jobs[job_id] = asyncio.create_task(
                     context.runner.run(
                         request.command,
                         permission=context.permission,
                         timeout=request.timeout,
-                        approved=context.approved,
+                        approved=approved,
                     )
                 )
                 return ToolResult.ok("background command started", {"job_id": job_id})
@@ -173,37 +207,109 @@ class KnowledgeSearchInput(BaseModel):
 
 class KnowledgeSearchTool(BaseTool):
     name = "knowledge_search"
-    description = "Search the workspace's auditable JSONL project-memory index."
+    description = (
+        "Search workspace semantic/keyword index when present, else the auditable "
+        "JSONL project-memory knowledge file."
+    )
     input_model = KnowledgeSearchInput
 
     async def execute(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
         request = self.validate(arguments)
         try:
+            from ..rag.workspace_index import index_exists, search_workspace
+
+            if index_exists(context.workspace):
+                index_hits = await search_workspace(
+                    context.workspace, request.query, limit=request.limit
+                )
+                if index_hits:
+                    hits = [
+                        {
+                            "source_path": hit.path,
+                            "score": hit.score,
+                            "citation": hit.chunk_id or hit.path,
+                            "record": hit.as_dict(),
+                        }
+                        for hit in index_hits
+                    ]
+                    return ToolResult.ok(
+                        f"found {len(hits)} workspace index hits with evidence citations",
+                        {
+                            "hits": hits,
+                            "evidence_required": True,
+                            "degraded": False,
+                            "channel": "workspace_index",
+                        },
+                    )
+                # Empty index results degrade to knowledge.jsonl when available.
+
             path = context.boundary.resolve(request.path)
             if not path.is_file():
+                if index_exists(context.workspace):
+                    return ToolResult.ok(
+                        "no workspace index evidence found; answers must degrade without citations",
+                        {
+                            "hits": [],
+                            "evidence_required": True,
+                            "degraded": True,
+                            "channel": "workspace_index",
+                        },
+                    )
                 return ToolResult.blocked(
                     "project knowledge index is not initialized",
                     root_cause=str(path),
-                    retry="create the JSONL index during knowledge finalization",
+                    retry=(
+                        "create the JSONL index during knowledge finalization "
+                        "or run index_workspace"
+                    ),
                 )
             terms = {term.lower() for term in re.findall(r"[\w-]+", request.query)}
-            ranked: list[tuple[int, dict[str, Any]]] = []
-            for line in path.read_text(encoding="utf-8").splitlines():
-                if not line.strip():
-                    continue
-                item = json.loads(line)
-                haystack = json.dumps(item, ensure_ascii=False).lower()
-                score = sum(haystack.count(term) for term in terms)
-                if score:
-                    ranked.append((score, item))
-            ranked.sort(key=lambda pair: pair[0], reverse=True)
+
+            def _scan() -> list[dict[str, Any]]:
+                ranked: list[tuple[int, dict[str, Any]]] = []
+                with path.open(encoding="utf-8") as handle:
+                    for line in handle:
+                        if not line.strip():
+                            continue
+                        item = json.loads(line)
+                        haystack = json.dumps(item, ensure_ascii=False).lower()
+                        score = sum(haystack.count(term) for term in terms)
+                        if score:
+                            ranked.append((score, item))
+                ranked.sort(key=lambda pair: pair[0], reverse=True)
+                hits = []
+                for score, item in ranked[: request.limit]:
+                    evidence = {
+                        "source_path": str(path),
+                        "score": score,
+                        "citation": item.get("id") or item.get("title") or item.get("summary"),
+                        "record": item,
+                    }
+                    hits.append(evidence)
+                return hits
+
+            hits = await asyncio.to_thread(_scan)
+            if not hits:
+                return ToolResult.ok(
+                    "no knowledge evidence found; answers must degrade without citations",
+                    {
+                        "hits": [],
+                        "evidence_required": True,
+                        "degraded": True,
+                        "channel": "knowledge_jsonl",
+                    },
+                )
             return ToolResult.ok(
-                f"found {min(len(ranked), request.limit)} knowledge records",
-                [item for _, item in ranked[: request.limit]],
+                f"found {len(hits)} knowledge records with evidence citations",
+                {
+                    "hits": hits,
+                    "evidence_required": True,
+                    "degraded": False,
+                    "channel": "knowledge_jsonl",
+                },
             )
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             return ToolResult.error("knowledge search failed", root_cause=str(exc))
-
 
 class DelegateInput(BaseModel):
     task: str = Field(min_length=5, max_length=10_000)
@@ -216,11 +322,11 @@ class SubAgentTool(BaseTool):
 
     async def execute(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
         request = self.validate(arguments)
-        if context.permission is not PermissionMode.FULL or not context.approved:
+        if context.permission is not PermissionMode.FULL or not context.allows("sub_agent"):
             return ToolResult.blocked(
                 "sub-agent delegation requires approval",
-                root_cause="full permission was not approved",
-                retry="approve the delegation and use full permission",
+                root_cause="high-risk ops were not approved",
+                retry="approve the sub_agent operation and use full permission",
             )
         handler = context.metadata.get("sub_agent")
         if not callable(handler):
@@ -248,11 +354,17 @@ class MCPTool(BaseTool):
 
     async def execute(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
         request = self.validate(arguments)
-        if context.permission is not PermissionMode.FULL or not context.approved:
+        if context.permission is not PermissionMode.FULL or not context.allows("mcp"):
             return ToolResult.blocked(
                 "MCP invocation requires approval",
-                root_cause="full permission was not approved",
+                root_cause="high-risk ops were not approved",
                 retry="approve the MCP invocation and use full permission",
+            )
+        if context.metadata.get("mcp_network_approved") is False:
+            return ToolResult.blocked(
+                "MCP HTTP transport requires network approval",
+                root_cause="mcp network capability was not granted",
+                retry="approve mcp network access or use local MCP handlers",
             )
         handler = context.metadata.get("mcp")
         whitelist = set(context.metadata.get("mcp_whitelist", []))
@@ -278,8 +390,181 @@ class MCPTool(BaseTool):
             return ToolResult.error("MCP tool failed", root_cause=str(exc))
 
 
+class OpenPullRequestInput(BaseModel):
+    title: str = Field(min_length=3, max_length=200)
+    body: str = Field(default="", max_length=20_000)
+    base: str = Field(default="main", min_length=1, max_length=128)
+    head: str | None = Field(default=None, max_length=128)
+    draft: bool = False
+
+
+class OpenPullRequestTool(BaseTool):
+    """Open a pull request via metadata callback or ``gh pr create``.
+
+    Requires PermissionMode.FULL and an explicit ``git_publish`` capability.
+    Network-backed ``gh`` additionally requires the ``git_publish`` network
+    capability. TaskExec can request a dedicated ``git_publish`` approval which
+    re-enqueues a publish follow-up job.
+    """
+
+    name = "open_pull_request"
+    description = (
+        "Open a GitHub pull request after explicit full-permission and ops approval."
+    )
+    input_model = OpenPullRequestInput
+
+    async def execute(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
+        request = self.validate(arguments)
+        if context.permission is not PermissionMode.FULL:
+            return ToolResult.blocked(
+                "opening a pull request requires full permission",
+                root_cause="full permission was not granted",
+                retry="use full permission and explicitly approve git publication",
+            )
+        publish_approved = _git_publish_approved(context)
+        if not publish_approved:
+            return ToolResult.blocked(
+                "opening a pull request requires git publish approval",
+                root_cause="metadata does not grant the git_publish capability",
+                retry=(
+                    "set metadata.publish_approved=true or include git_publish "
+                    "in metadata.ops_capabilities"
+                ),
+            )
+        handler = context.metadata.get("open_pr")
+        if callable(handler):
+            try:
+                data = await _call(
+                    handler,
+                    request.title,
+                    request.body,
+                    request.base,
+                    request.head,
+                    request.draft,
+                )
+                return ToolResult.ok("pull request opened", data)
+            except Exception as exc:
+                return ToolResult.error("open pull request failed", root_cause=str(exc))
+
+        if not context.allows_network("git_publish"):
+            return ToolResult.blocked(
+                "opening a pull request via gh requires network approval",
+                root_cause="network access is restricted",
+                retry="approve git_publish network access or configure metadata.open_pr",
+            )
+        try:
+            command = [
+                "gh",
+                "pr",
+                "create",
+                "--title",
+                request.title,
+                "--body",
+                request.body or request.title,
+                "--base",
+                request.base,
+            ]
+            if request.head:
+                command.extend(["--head", request.head])
+            if request.draft:
+                command.append("--draft")
+            # Prefer shlex.join so LocalRunner's shlex.split rebuilds argv safely.
+            quoted = shlex.join(command)
+            result = await context.runner.run(
+                quoted,
+                permission=PermissionMode.FULL,
+                approved=publish_approved,
+            )
+            if result.exit_code != 0:
+                return ToolResult.error(
+                    "gh pr create failed",
+                    root_cause=result.stderr or result.stdout or f"exit {result.exit_code}",
+                    retry="ensure gh is authenticated and the branch is pushed",
+                )
+            return ToolResult.ok(
+                "pull request opened via gh",
+                {"stdout": result.stdout, "stderr": result.stderr},
+            )
+        except (PermissionDenied, OSError, ValueError) as exc:
+            return ToolResult.error("open pull request failed", root_cause=str(exc))
+
+
 async def _call(handler: Callable[..., Any], *args: Any) -> Any:
     value = handler(*args)
     if inspect.isawaitable(value):
         return await value
     return value
+
+
+class UnsafeWebFetchURL(ValueError):
+    """Raised when a URL or one of its resolved addresses is not public."""
+
+
+async def _validate_public_http_url(url: str) -> None:
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError as exc:
+        raise UnsafeWebFetchURL(f"invalid URL: {exc}") from exc
+    if parsed.scheme.lower() not in {"http", "https"}:
+        raise UnsafeWebFetchURL("only HTTP and HTTPS URLs are allowed")
+    if parsed.username is not None or parsed.password is not None:
+        raise UnsafeWebFetchURL("URL user information is not allowed")
+    host = parsed.hostname
+    if not host:
+        raise UnsafeWebFetchURL("URL must include a hostname")
+    effective_port = port or (443 if parsed.scheme.lower() == "https" else 80)
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        try:
+            addresses = await asyncio.to_thread(_resolve_host_addresses, host, effective_port)
+        except OSError as exc:
+            raise UnsafeWebFetchURL(f"hostname resolution failed for {host}: {exc}") from exc
+        if not addresses:
+            raise UnsafeWebFetchURL(
+                f"hostname resolution returned no addresses for {host}"
+            ) from None
+    else:
+        addresses = {str(literal)}
+    for address in addresses:
+        try:
+            resolved = ipaddress.ip_address(address)
+        except ValueError as exc:
+            raise UnsafeWebFetchURL(f"hostname resolved to an invalid address: {address}") from exc
+        if any(
+            (
+                resolved.is_loopback,
+                resolved.is_link_local,
+                resolved.is_private,
+                resolved.is_multicast,
+                resolved.is_reserved,
+                resolved.is_unspecified,
+            )
+        ):
+            raise UnsafeWebFetchURL(
+                f"hostname {host} resolves to a non-public address: {resolved}"
+            )
+
+
+def _resolve_host_addresses(host: str, port: int) -> set[str]:
+    return {
+        str(sockaddr[0])
+        for _family, _type, _proto, _canonname, sockaddr in socket.getaddrinfo(
+            host,
+            port,
+            type=socket.SOCK_STREAM,
+        )
+    }
+
+
+def _git_publish_approved(context: ToolContext) -> bool:
+    if context.allows("git_publish"):
+        return True
+    metadata = context.metadata
+    if metadata.get("publish_approved") is True:
+        return True
+    capabilities = metadata.get("ops_capabilities")
+    return isinstance(capabilities, (list, tuple, set, frozenset, dict)) and (
+        "git_publish" in capabilities
+    )

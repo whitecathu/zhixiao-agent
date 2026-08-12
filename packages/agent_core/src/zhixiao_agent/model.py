@@ -55,13 +55,19 @@ class OpenAICompatibleModel(CodingModel):
         self._rate_lock = asyncio.Lock()
 
     async def _throttle(self) -> None:
+        delay = 0.0
         async with self._rate_lock:
             now = time.monotonic()
             while self._request_times and now - self._request_times[0] >= 60:
                 self._request_times.popleft()
             if len(self._request_times) >= self.profile.requests_per_minute:
-                delay = 60 - (now - self._request_times[0])
-                await asyncio.sleep(max(delay, 0))
+                delay = max(60 - (now - self._request_times[0]), 0)
+        if delay:
+            await asyncio.sleep(delay)
+        async with self._rate_lock:
+            now = time.monotonic()
+            while self._request_times and now - self._request_times[0] >= 60:
+                self._request_times.popleft()
             self._request_times.append(time.monotonic())
 
     async def complete(

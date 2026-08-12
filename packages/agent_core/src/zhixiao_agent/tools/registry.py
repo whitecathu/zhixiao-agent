@@ -11,12 +11,25 @@ from .integrations import (
     BackgroundCommandTool,
     KnowledgeSearchTool,
     MCPTool,
+    OpenPullRequestTool,
     SubAgentTool,
     WebFetchTool,
     WebSearchTool,
 )
 from .terminal import TerminalTool, TestTool
 from .todo import TodoTool
+
+READ_ONLY_TOOLS = frozenset(
+    {
+        "list_directory",
+        "read_file",
+        "grep",
+        "git_status",
+        "git_diff",
+        "knowledge_search",
+        "todo",
+    }
+)
 
 
 class ToolRegistry:
@@ -32,6 +45,10 @@ class ToolRegistry:
 
     def get(self, name: str) -> BaseTool | None:
         return self._tools.get(name)
+
+    def names(self) -> frozenset[str]:
+        """Return the registered tool names without exposing registry internals."""
+        return frozenset(self._tools)
 
     def schemas(self, allowed: set[str] | None = None) -> list[dict[str, Any]]:
         return [
@@ -64,24 +81,29 @@ class ToolRegistry:
         return await tool.execute(arguments, context)
 
 
-def build_default_registry() -> ToolRegistry:
-    return ToolRegistry(
-        [
-            ListDirectoryTool(),
-            ReadFileTool(),
-            GrepTool(),
-            ExactEditTool(),
-            WriteFileTool(),
-            TerminalTool(),
-            TestTool(),
-            GitStatusTool(),
-            GitDiffTool(),
-            TodoTool(),
-            BackgroundCommandTool(),
-            KnowledgeSearchTool(),
-            WebSearchTool(),
-            WebFetchTool(),
-            SubAgentTool(),
-            MCPTool(),
-        ]
-    )
+def build_default_registry(*, include_experimental: bool = False) -> ToolRegistry:
+    """Build the default tool set.
+
+    MCP and sub_agent stay opt-in until a Worker injects audited adapters.
+    """
+    tools: list[BaseTool] = [
+        ListDirectoryTool(),
+        ReadFileTool(),
+        GrepTool(),
+        ExactEditTool(),
+        WriteFileTool(),
+        TerminalTool(),
+        TestTool(),
+        GitStatusTool(),
+        GitDiffTool(),
+        TodoTool(),
+        BackgroundCommandTool(),
+        KnowledgeSearchTool(),
+        WebSearchTool(),
+        WebFetchTool(),
+        # Always registered; execute path blocks without FULL + ops_approved.
+        OpenPullRequestTool(),
+    ]
+    if include_experimental:
+        tools.extend([SubAgentTool(), MCPTool()])
+    return ToolRegistry(tools)

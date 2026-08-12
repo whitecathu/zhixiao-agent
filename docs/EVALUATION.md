@@ -10,12 +10,43 @@ python tests/evals/run_scenarios.py --validate-only --output evaluation-manifest
 
 该命令只校验清单，报告 `status=manifest_validated` 且 `metrics=null`。它不能证明 Agent 完成了场景。
 
-## 真实结果格式
+## 离线门禁（Fixture）
 
-运行器或人工复核器为每个场景输出：
+CI 运行 `run_offline_gates.py`，使用仓库内固定 fixture 检查报告管线与安全策略。其结果必须标记为：
 
 ```json
 {
+  "status": "offline_harness",
+  "evaluation_mode": "offline_fixture",
+  "metrics_source": "fixture"
+}
+```
+
+这些指标只描述确定性 fixture，不是模型实测值，不能用于声明在线 Agent 的任务完成率、延迟或质量。
+
+## 在线评测（Live）
+
+对真实模型跑场景（默认关闭；CI 不得设置 `ZHIXIAO_LIVE_EVAL`）：
+
+```bash
+ZHIXIAO_LIVE_EVAL=1 LLM_API_KEY=... python tests/evals/run_live.py \
+  --output artifacts/evaluation/live_results.json
+python tests/evals/run_scenarios.py \
+  --results artifacts/evaluation/live_results.json \
+  --output artifacts/evaluation/live_report.json
+```
+
+未设置 `ZHIXIAO_LIVE_EVAL=1` 或缺少 `LLM_API_KEY` 时进程以退出码 2 结束，且不会调用 Offline/Scripted 模型冒充 live。可选 `LLM_INPUT_COST_PER_MILLION` / `LLM_OUTPUT_COST_PER_MILLION` 用于成本字段。
+
+## 真实结果格式
+
+Live 运行器输出 `status=live`、`evaluation_mode=live`、`metrics_source=live_agent_runtime`，并为每个场景记录结果：
+
+```json
+{
+  "status": "live",
+  "evaluation_mode": "live",
+  "metrics_source": "live_agent_runtime",
   "results": [
     {
       "scenario_id": "python-bugfix",

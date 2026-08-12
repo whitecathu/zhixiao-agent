@@ -36,6 +36,14 @@ from .vector import (
     rollback_vectors,
     validate_stores,
 )
+from .workspace_index import (
+    IndexChunk,
+    IndexHit,
+    IndexReport,
+    index_exists,
+    index_workspace,
+    search_workspace,
+)
 
 __all__ = [
     "BenchmarkResult",
@@ -49,6 +57,9 @@ __all__ = [
     "GraphStore",
     "GraphStoreDependencyError",
     "HybridRetriever",
+    "IndexChunk",
+    "IndexHit",
+    "IndexReport",
     "InMemoryGraphStore",
     "InMemoryVectorStore",
     "LLMTripleExtractor",
@@ -70,7 +81,10 @@ __all__ = [
     "benchmark_store",
     "build_vector_store",
     "extract_query_entities",
+    "index_exists",
+    "index_workspace",
     "migrate_vectors",
     "rollback_vectors",
+    "search_workspace",
     "validate_stores",
 ]

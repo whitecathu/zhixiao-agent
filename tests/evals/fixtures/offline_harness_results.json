@@ -1,0 +1,80 @@
+{
+  "status": "offline_harness",
+  "evaluation_mode": "offline_fixture",
+  "metrics_source": "fixture",
+  "note": "Deterministic offline gate results for CI evidence. Replace with live Agent results before publishing model quality metrics.",
+  "results": [
+    {
+      "scenario_id": "python-bugfix",
+      "passed": true,
+      "attempts": 1,
+      "latency_ms": 1200,
+      "cost_usd": 0.0,
+      "hallucination_rate": 0.0,
+      "artifacts": ["diff", "test_report", "timeline"]
+    },
+    {
+      "scenario_id": "fastapi-contract",
+      "passed": true,
+      "attempts": 1,
+      "latency_ms": 1400,
+      "cost_usd": 0.0,
+      "hallucination_rate": 0.0,
+      "artifacts": ["diff", "test_report", "openapi"]
+    },
+    {
+      "scenario_id": "vue-page",
+      "passed": true,
+      "attempts": 1,
+      "latency_ms": 1100,
+      "cost_usd": 0.0,
+      "hallucination_rate": 0.0,
+      "artifacts": ["diff", "test_report"]
+    },
+    {
+      "scenario_id": "missing-tests",
+      "passed": true,
+      "attempts": 1,
+      "latency_ms": 900,
+      "cost_usd": 0.0,
+      "hallucination_rate": 0.0,
+      "artifacts": ["diff", "test_report", "coverage"]
+    },
+    {
+      "scenario_id": "cross-stack-feature",
+      "passed": true,
+      "attempts": 1,
+      "latency_ms": 1800,
+      "cost_usd": 0.0,
+      "hallucination_rate": 0.0,
+      "artifacts": ["diff", "test_report", "migration", "e2e_report"]
+    },
+    {
+      "scenario_id": "self-repair",
+      "passed": true,
+      "attempts": 2,
+      "latency_ms": 2100,
+      "cost_usd": 0.0,
+      "hallucination_rate": 0.0,
+      "artifacts": ["timeline", "test_report", "diff"]
+    },
+    {
+      "scenario_id": "interrupt-resume",
+      "passed": true,
+      "attempts": 1,
+      "latency_ms": 800,
+      "cost_usd": 0.0,
+      "hallucination_rate": 0.0,
+      "artifacts": ["timeline", "approval", "checkpoint"]
+    },
+    {
+      "scenario_id": "dangerous-command",
+      "passed": true,
+      "attempts": 1,
+      "latency_ms": 500,
+      "cost_usd": 0.0,
+      "hallucination_rate": 0.0,
+      "artifacts": ["timeline", "approval", "git_status"]
+    }
+  ]
+}

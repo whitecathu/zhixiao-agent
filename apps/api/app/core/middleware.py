@@ -4,18 +4,21 @@
 
 import time
 import uuid
-from typing import Callable, Optional
+from typing import Optional
 
 from fastapi import Depends, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
-from app.core.config import settings
 from app.core.error_codes import ErrorCode
 from app.core.exceptions import BizException
 from app.core.redis_client import rate_limit
 from app.core.security import decode_access_token
+from app.db.session import get_session
+from app.model.user import SpaceMember
 
 
 class TraceIdMiddleware(BaseHTTPMiddleware):
@@ -71,8 +74,12 @@ async def get_current_user(
     }
 
 
-async def get_space_id(request: Request, user: dict = Depends(get_current_user)) -> int:
-    """空间隔离依赖：业务接口强制要求 X-Space-Id Header"""
+async def get_space_id(
+    request: Request,
+    user: dict = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> int:
+    """空间隔离依赖：要求 X-Space-Id，并校验当前用户为该空间成员。"""
     space_header = request.headers.get("X-Space-Id")
     if not space_header:
         raise BizException(ErrorCode.SPACE_NOT_FOUND, http_status=400)
@@ -80,7 +87,14 @@ async def get_space_id(request: Request, user: dict = Depends(get_current_user))
         space_id = int(space_header)
     except ValueError:
         raise BizException(ErrorCode.PARAM_INVALID, http_status=400)
-    # 实际项目中需校验该用户是否为该空间成员（在 service 层进行）
+    member = await session.scalar(
+        select(SpaceMember).where(
+            SpaceMember.space_id == space_id,
+            SpaceMember.user_id == user["user_id"],
+        )
+    )
+    if member is None and user.get("payload", {}).get("role") != "super_admin":
+        raise BizException(ErrorCode.AUTH_PERMISSION_DENIED, http_status=403)
     request.state.space_id = space_id
     return space_id
 

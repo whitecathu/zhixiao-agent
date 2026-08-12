@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shlex
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -79,6 +80,101 @@ class LocalRunner(Runner):
             raise
 
 
+class BubblewrapRunner(Runner):
+    """Linux process sandbox exposing only runtime binaries and the selected workspace."""
+
+    def __init__(self, workspace: Path, *, network_enabled: bool = False):
+        self.boundary = WorkspaceBoundary(workspace)
+        self.policy = CommandPolicy()
+        self.network_enabled = network_enabled
+
+    async def run(
+        self,
+        command: str,
+        *,
+        permission: PermissionMode,
+        timeout: int = 120,
+        approved: bool = False,
+    ) -> CommandResult:
+        if os.name == "nt":
+            raise RuntimeError("bubblewrap runner is only available on Linux")
+        self.policy.validate(command, permission, approved=approved)
+        command_args = shlex.split(command)
+        if not command_args:
+            raise ValueError("command cannot be empty")
+        mount_mode = "--ro-bind" if permission is PermissionMode.READ_ONLY else "--bind"
+        args = [
+            "bwrap",
+            "--die-with-parent",
+            "--new-session",
+        ]
+        if self.network_enabled:
+            args.extend(
+                [
+                    "--unshare-user",
+                    "--unshare-ipc",
+                    "--unshare-pid",
+                    "--unshare-uts",
+                    "--unshare-cgroup",
+                ]
+            )
+        else:
+            args.append("--unshare-all")
+        args.extend(
+            [
+                "--proc",
+                "/proc",
+                "--dev",
+                "/dev",
+                "--tmpfs",
+                "/tmp",  # noqa: S108 - isolated sandbox tmpfs, not host /tmp
+                mount_mode,
+                str(self.boundary.root),
+                "/workspace",
+                "--chdir",
+                "/workspace",
+                "--setenv",
+                "HOME",
+                "/tmp",  # noqa: S108 - isolated sandbox home
+                "--setenv",
+                "PATH",
+                "/usr/local/bin:/usr/bin:/bin",
+            ]
+        )
+        for path in ("/usr", "/usr/local", "/bin", "/lib", "/lib64", "/etc/ssl"):
+            if Path(path).exists():
+                args.extend(["--ro-bind", path, path])
+        args.extend(["--", *command_args])
+        process = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={"PATH": os.environ.get("PATH", ""), "LANG": os.environ.get("LANG", "C.UTF-8")},
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            return CommandResult(
+                command=command,
+                exit_code=process.returncode or 0,
+                stdout=stdout.decode(errors="replace"),
+                stderr=stderr.decode(errors="replace"),
+            )
+        except TimeoutError:
+            process.kill()
+            await process.communicate()
+            return CommandResult(
+                command=command,
+                exit_code=-1,
+                stdout="",
+                stderr=f"command timed out after {timeout}s",
+                timed_out=True,
+            )
+        except asyncio.CancelledError:
+            process.kill()
+            await process.communicate()
+            raise
+
+
 class DockerRunner(Runner):
     def __init__(
         self,
@@ -107,27 +203,69 @@ class DockerRunner(Runner):
         approved: bool = False,
     ) -> CommandResult:
         self.policy.validate(command, permission, approved=approved)
-        mount_mode = "rw" if permission is PermissionMode.FULL else "ro"
-        docker_command = " ".join(
-            [
-                "docker run --rm",
-                f"--network {self.network}",
-                f"--memory {self.memory}",
-                f"--cpus {self.cpus}",
-                *([f"--storage-opt size={self.storage}"] if self.storage else []),
-                "--pids-limit 256",
-                "--read-only",
-                "--tmpfs /tmp:rw,noexec,nosuid,size=256m",
-                f'-v "{self.boundary.root}:/workspace:{mount_mode}"',
-                "-w /workspace",
-                self.image,
-                command,
-            ]
+        if not re.fullmatch(r"[A-Za-z0-9._/@:-]+", self.image):
+            raise ValueError("docker image contains unsupported characters")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", self.network):
+            raise ValueError("docker network contains unsupported characters")
+        command_args = shlex.split(command, posix=os.name != "nt")
+        if not command_args:
+            raise ValueError("command cannot be empty")
+        # EDIT/EXECUTE/FULL need a writable workspace mount; READ_ONLY stays read-only.
+        mount_mode = "ro" if permission is PermissionMode.READ_ONLY else "rw"
+        mount_spec = f"type=bind,src={self.boundary.root},dst=/workspace"
+        if mount_mode == "ro":
+            mount_spec += ",readonly"
+        args = [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            self.network,
+            "--memory",
+            self.memory,
+            "--cpus",
+            self.cpus,
+            "--pids-limit",
+            "256",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--read-only",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=256m",  # noqa: S108 - container-local tmpfs
+            "--mount",
+            mount_spec,
+            "--workdir",
+            "/workspace",
+        ]
+        if self.storage:
+            args.extend(["--storage-opt", f"size={self.storage}"])
+        args.extend([self.image, *command_args])
+        process = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-        local = LocalRunner(self.boundary.root)
-        return await local.run(
-            docker_command,
-            permission=permission,
-            timeout=timeout,
-            approved=approved,
-        )
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            return CommandResult(
+                command=command,
+                exit_code=process.returncode or 0,
+                stdout=stdout.decode(errors="replace"),
+                stderr=stderr.decode(errors="replace"),
+            )
+        except TimeoutError:
+            process.kill()
+            await process.communicate()
+            return CommandResult(
+                command=command,
+                exit_code=-1,
+                stdout="",
+                stderr=f"command timed out after {timeout}s",
+                timed_out=True,
+            )
+        except asyncio.CancelledError:
+            process.kill()
+            await process.communicate()
+            raise

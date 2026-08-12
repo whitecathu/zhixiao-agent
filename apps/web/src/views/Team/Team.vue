@@ -1,15 +1,36 @@
 <template>
   <section class="page-stack">
     <header class="page-heading">
-      <div><p class="eyebrow">ORGANIZATION</p><h1>团队空间</h1><p>创建、切换与管理协作空间，所有工程任务都在当前空间内运行。</p></div>
+      <div>
+        <p class="eyebrow">ORGANIZATION</p>
+        <h1>团队空间</h1>
+        <p>创建、切换与管理协作空间，所有工程任务都在当前空间内运行。</p>
+      </div>
       <el-button type="primary" @click="dialog = true">新建空间</el-button>
     </header>
 
     <el-card shadow="never">
-      <el-table :data="userStore.spaces" class="clickable-table" stripe @row-click="onPick">
-        <el-table-column prop="id" label="ID" width="80" />
-        <el-table-column prop="name" label="名称" />
-        <el-table-column prop="description" label="描述" />
+      <el-table
+        v-if="userStore.spaces.length"
+        :data="userStore.spaces"
+        class="clickable-table"
+        @row-click="onPick"
+      >
+        <el-table-column prop="id" label="ID" width="80">
+          <template #default="{ row }">
+            <span class="mono">#{{ row.id }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="name" label="名称">
+          <template #default="{ row }">
+            <strong>{{ row.name }}</strong>
+          </template>
+        </el-table-column>
+        <el-table-column prop="description" label="描述">
+          <template #default="{ row }">
+            <span class="muted">{{ row.description || "—" }}</span>
+          </template>
+        </el-table-column>
         <el-table-column label="状态" width="120">
           <template #default="{ row }">
             <el-tag v-if="row.id === userStore.currentSpaceId" type="success">当前使用</el-tag>
@@ -18,19 +39,27 @@
         </el-table-column>
         <el-table-column label="操作" width="200">
           <template #default="{ row }">
-            <el-button v-if="row.id === userStore.currentSpaceId" disabled size="small" type="success">当前</el-button>
+            <el-button v-if="row.id === userStore.currentSpaceId" disabled size="small" type="success">
+              当前
+            </el-button>
             <el-button v-else size="small" @click.stop="onPick(row)">切换</el-button>
             <el-button size="small" @click.stop="openManage(row)">管理</el-button>
           </template>
         </el-table-column>
       </el-table>
-      <el-empty v-if="!userStore.spaces.length" description="还没有工作空间，先创建一个吧" />
+      <el-empty v-else description="还没有工作空间">
+        <el-button type="primary" @click="dialog = true">创建第一个空间</el-button>
+      </el-empty>
     </el-card>
 
     <el-dialog v-model="dialog" title="新建空间" width="480px" destroy-on-close>
       <el-form :model="form" label-position="top">
-        <el-form-item label="名称"><el-input v-model="form.name" placeholder="例如：前端工程组" /></el-form-item>
-        <el-form-item label="描述"><el-input v-model="form.description" type="textarea" :rows="3" placeholder="可选，描述空间用途" /></el-form-item>
+        <el-form-item label="名称">
+          <el-input v-model="form.name" placeholder="例如：前端工程组" />
+        </el-form-item>
+        <el-form-item label="描述">
+          <el-input v-model="form.description" type="textarea" :rows="3" placeholder="可选，描述空间用途" />
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="dialog = false">取消</el-button>
@@ -38,9 +67,11 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="mgr" title="空间成员管理" width="640px">
-      <el-form :inline="true" :model="member">
-        <el-form-item label="用户ID"><el-input-number v-model="member.user_id" /></el-form-item>
+    <el-dialog v-model="mgr" title="空间成员管理" width="640px" destroy-on-close>
+      <el-form :inline="true" :model="member" class="member-form">
+        <el-form-item label="用户 ID">
+          <el-input-number v-model="member.user_id" :min="1" />
+        </el-form-item>
         <el-form-item label="角色">
           <el-select v-model="member.role" style="width: 140px">
             <el-option label="空间管理员" value="space_admin" />
@@ -49,7 +80,7 @@
         </el-form-item>
         <el-button type="primary" @click="addMember">邀请</el-button>
       </el-form>
-      <el-table :data="members" style="margin-top: 12px">
+      <el-table :data="members" empty-text="暂无成员">
         <el-table-column prop="user_id" label="用户 ID" />
         <el-table-column prop="role" label="角色" />
         <el-table-column label="操作" width="100">
@@ -122,3 +153,16 @@ async function remove(uid: number) {
   members.value = await spaceApi.listMembers(managed.value);
 }
 </script>
+
+<style scoped lang="scss">
+.mono {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.member-form {
+  margin-bottom: 8px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+</style>

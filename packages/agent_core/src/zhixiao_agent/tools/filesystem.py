@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
@@ -30,17 +31,23 @@ class ListDirectoryTool(BaseTool):
             directory = context.boundary.resolve(request.path, must_exist=True)
             if not directory.is_dir():
                 return ToolResult.error("path is not a directory", root_cause=str(directory))
-            iterator = directory.rglob("*") if request.recursive else directory.iterdir()
+            workspace_root = context.workspace.resolve()
             ignored = {".git", ".venv", "node_modules", "__pycache__", "dist", "build"}
-            items: list[str] = []
-            for item in iterator:
-                if any(part in ignored for part in item.parts):
-                    continue
-                suffix = "/" if item.is_dir() else ""
-                items.append(item.relative_to(context.workspace.resolve()).as_posix() + suffix)
-                if len(items) >= request.limit:
-                    break
-            return ToolResult.ok(f"listed {len(items)} entries", sorted(items))
+
+            def _list() -> list[str]:
+                iterator = directory.rglob("*") if request.recursive else directory.iterdir()
+                items: list[str] = []
+                for item in iterator:
+                    if any(part in ignored for part in item.parts):
+                        continue
+                    suffix = "/" if item.is_dir() else ""
+                    items.append(item.relative_to(workspace_root).as_posix() + suffix)
+                    if len(items) >= request.limit:
+                        break
+                return sorted(items)
+
+            items = await asyncio.to_thread(_list)
+            return ToolResult.ok(f"listed {len(items)} entries", items)
         except (OSError, WorkspaceViolation, ValueError) as exc:
             return ToolResult.error(
                 "unable to list directory",
@@ -66,20 +73,29 @@ class ReadFileTool(BaseTool):
             path = context.boundary.resolve(request.path, must_exist=True)
             if not path.is_file():
                 return ToolResult.error("path is not a file", root_cause=str(path))
-            if path.stat().st_size > request.max_bytes:
+
+            def _read() -> tuple[str, int]:
+                size = path.stat().st_size
+                if size > request.max_bytes:
+                    raise ValueError(f"{size} bytes > {request.max_bytes}")
+                lines = path.read_text(encoding="utf-8").splitlines()
+                end = request.end_line or len(lines)
+                selected = lines[request.start_line - 1 : end]
+                content = "\n".join(
+                    f"{line_number}:{line}"
+                    for line_number, line in enumerate(selected, start=request.start_line)
+                )
+                return content, len(selected)
+
+            try:
+                content, count = await asyncio.to_thread(_read)
+            except ValueError as exc:
                 return ToolResult.error(
                     "file exceeds read limit",
-                    root_cause=f"{path.stat().st_size} bytes > {request.max_bytes}",
+                    root_cause=str(exc),
                     retry="request a smaller file or increase max_bytes within the allowed limit",
                 )
-            lines = path.read_text(encoding="utf-8").splitlines()
-            end = request.end_line or len(lines)
-            selected = lines[request.start_line - 1 : end]
-            content = "\n".join(
-                f"{line_number}:{line}"
-                for line_number, line in enumerate(selected, start=request.start_line)
-            )
-            return ToolResult.ok(f"read {len(selected)} lines from {request.path}", content)
+            return ToolResult.ok(f"read {count} lines from {request.path}", content)
         except (OSError, UnicodeError, WorkspaceViolation, ValueError) as exc:
             return ToolResult.error(
                 "unable to read file",
@@ -106,32 +122,37 @@ class GrepTool(BaseTool):
             request = self.validate(arguments)
             root = context.boundary.resolve(request.path, must_exist=True)
             regex = re.compile(request.pattern, re.IGNORECASE if request.ignore_case else 0)
-            files = [root] if root.is_file() else root.rglob(request.glob)
-            matches: list[dict[str, Any]] = []
-            for path in files:
-                if not path.is_file() or any(
-                    p in {".git", "node_modules", ".venv"} for p in path.parts
-                ):
-                    continue
-                try:
-                    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-                        if regex.search(line):
-                            matches.append(
-                                {
-                                    "path": path.relative_to(
-                                        context.workspace.resolve()
-                                    ).as_posix(),
-                                    "line": number,
-                                    "text": line,
-                                }
-                            )
-                            if len(matches) >= request.limit:
-                                return ToolResult.ok(
-                                    f"found at least {len(matches)} matches", matches
+            workspace_root = context.workspace.resolve()
+
+            def _search() -> list[dict[str, Any]]:
+                files = [root] if root.is_file() else root.rglob(request.glob)
+                matches: list[dict[str, Any]] = []
+                for path in files:
+                    if not path.is_file() or any(
+                        p in {".git", "node_modules", ".venv"} for p in path.parts
+                    ):
+                        continue
+                    try:
+                        for number, line in enumerate(
+                            path.read_text(encoding="utf-8").splitlines(), 1
+                        ):
+                            if regex.search(line):
+                                matches.append(
+                                    {
+                                        "path": path.relative_to(workspace_root).as_posix(),
+                                        "line": number,
+                                        "text": line,
+                                    }
                                 )
-                except (UnicodeError, OSError):
-                    continue
-            return ToolResult.ok(f"found {len(matches)} matches", matches)
+                                if len(matches) >= request.limit:
+                                    return matches
+                    except (UnicodeError, OSError):
+                        continue
+                return matches
+
+            matches = await asyncio.to_thread(_search)
+            prefix = "at least " if len(matches) >= request.limit else ""
+            return ToolResult.ok(f"found {prefix}{len(matches)} matches", matches)
         except (re.error, OSError, WorkspaceViolation, ValueError) as exc:
             return ToolResult.error(
                 "search failed", root_cause=str(exc), retry="check the regex and path"
@@ -159,8 +180,12 @@ class WriteFileTool(BaseTool):
                     root_cause=str(path),
                     retry="use exact_edit or explicitly set overwrite after reading the file",
                 )
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(request.content, encoding="utf-8")
+
+            def _write() -> None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(request.content, encoding="utf-8")
+
+            await asyncio.to_thread(_write)
             return ToolResult.ok(
                 f"wrote {len(request.content)} characters",
                 artifacts=[Artifact(kind="file", path=str(path), description="written file")],
@@ -187,26 +212,36 @@ class ExactEditTool(BaseTool):
             require_write(context.permission)
             request = self.validate(arguments)
             path = context.boundary.resolve(request.path, must_exist=True)
-            content = path.read_text(encoding="utf-8")
-            count = content.count(request.old_text)
-            if count == 0:
+
+            def _edit() -> int:
+                content = path.read_text(encoding="utf-8")
+                count = content.count(request.old_text)
+                if count == 0:
+                    raise LookupError("missing")
+                if count > 1 and not request.replace_all:
+                    raise ValueError(f"{count} matches")
+                updated = content.replace(
+                    request.old_text, request.new_text, -1 if request.replace_all else 1
+                )
+                path.write_text(updated, encoding="utf-8")
+                return count if request.replace_all else 1
+
+            try:
+                replaced = await asyncio.to_thread(_edit)
+            except LookupError:
                 return ToolResult.error(
                     "target text was not found",
                     root_cause=request.path,
                     retry="read the current file and use an exact substring",
                 )
-            if count > 1 and not request.replace_all:
+            except ValueError as exc:
                 return ToolResult.error(
                     "target text is not unique",
-                    root_cause=f"{count} matches",
+                    root_cause=str(exc),
                     retry="provide more context or set replace_all",
                 )
-            updated = content.replace(
-                request.old_text, request.new_text, -1 if request.replace_all else 1
-            )
-            path.write_text(updated, encoding="utf-8")
             return ToolResult.ok(
-                f"replaced {count if request.replace_all else 1} occurrence(s)",
+                f"replaced {replaced} occurrence(s)",
                 artifacts=[Artifact(kind="file", path=str(path), description="edited file")],
             )
         except (OSError, UnicodeError, WorkspaceViolation, PermissionDenied, ValueError) as exc:

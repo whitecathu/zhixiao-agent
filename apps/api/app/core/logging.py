@@ -3,11 +3,29 @@
 """
 
 import logging
+import re
 import sys
 
 from loguru import logger
 
 from app.core.config import settings
+
+_SECRET_PATTERNS = (
+    re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s,;]+"),
+    re.compile(r"(?i)((?:api[_-]?key|password|secret|token)\s*[:=]\s*)[^\s,;]+"),
+)
+
+
+def redact_message(message: str) -> str:
+    redacted = message
+    for pattern in _SECRET_PATTERNS:
+        redacted = pattern.sub(r"\1[REDACTED]", redacted)
+    return redacted
+
+
+def _redact_record(record) -> bool:
+    record["message"] = redact_message(str(record["message"]))
+    return True
 
 
 class InterceptHandler(logging.Handler):
@@ -19,8 +37,11 @@ class InterceptHandler(logging.Handler):
         except ValueError:
             level = record.levelno
         frame, depth = logging.currentframe(), 2
-        while frame.f_code.co_filename == logging.__file__:
-            frame = frame.f_back
+        while frame is not None and frame.f_code.co_filename == logging.__file__:
+            parent = frame.f_back
+            if parent is None:
+                break
+            frame = parent
             depth += 1
         logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
@@ -37,7 +58,13 @@ def setup_logging() -> None:
 
     logger.configure(extra={"trace_id": "-"})
 
-    logger.add(sys.stdout, format=fmt, level=settings.LOG_LEVEL, enqueue=True)
+    logger.add(
+        sys.stdout,
+        format=fmt,
+        level=settings.LOG_LEVEL,
+        enqueue=True,
+        filter=_redact_record,
+    )
     if settings.LOG_FILE:
         logger.add(
             settings.LOG_FILE,
@@ -47,6 +74,7 @@ def setup_logging() -> None:
             format=fmt,
             enqueue=True,
             encoding="utf-8",
+            filter=_redact_record,
         )
     # 第三方库日志 -> loguru
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "fastapi", "sqlalchemy"):

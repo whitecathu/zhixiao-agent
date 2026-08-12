@@ -3,9 +3,12 @@
 所有敏感信息必须从环境变量注入，绝不硬编码。
 """
 
-from functools import lru_cache
+from __future__ import annotations
 
-from pydantic import Field, field_validator
+from functools import lru_cache
+from urllib.parse import quote
+
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,7 +25,7 @@ class Settings(BaseSettings):
     APP_ENV: str = Field("dev", pattern="^(dev|test|prod)$")
     APP_HOST: str = "0.0.0.0"  # noqa: S104 - intentional service bind default
     APP_PORT: int = 8000
-    APP_DEBUG: bool = True
+    APP_DEBUG: bool = False
     LOG_LEVEL: str = "INFO"
     # Empty means stdout-only, which is safe for read-only containers. Operators
     # may opt in with a writable absolute path such as /tmp/zhixiao-api.log.
@@ -54,7 +57,7 @@ class Settings(BaseSettings):
 
     @property
     def redis_url(self) -> str:
-        auth = f":{self.REDIS_PASSWORD}@" if self.REDIS_PASSWORD else ""
+        auth = f":{quote(self.REDIS_PASSWORD, safe='')}@" if self.REDIS_PASSWORD else ""
         return f"redis://{auth}{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
 
     # Chroma
@@ -77,6 +80,9 @@ class Settings(BaseSettings):
     AI_ENGINE_BASE_URL: str = "http://localhost:8001"
     AI_ENGINE_TIMEOUT: int = 120
     WORKER_CALLBACK_TOKEN: str = ""
+    WORKER_JOB_SIGNING_SECRET: str = ""
+    RUNNER_ROOT: str = "/workspace/runs"
+    WORKSPACE_SOURCE_ROOTS: str = ""
     LLM_PROVIDER: str = "deepseek"
 
     # CORS
@@ -88,6 +94,21 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return [origin.strip() for origin in v.split(",") if origin.strip()]
         return v
+
+    @model_validator(mode="after")
+    def _validate_production_secrets(self) -> Settings:
+        if self.APP_ENV != "prod":
+            return self
+        weak_markers = {"change_me", "please_change_me_in_prod", "replace"}
+        if len(self.JWT_SECRET) < 32 or any(marker in self.JWT_SECRET for marker in weak_markers):
+            raise ValueError("JWT_SECRET must be a high-entropy production secret")
+        if len(self.WORKER_CALLBACK_TOKEN) < 32:
+            raise ValueError("WORKER_CALLBACK_TOKEN must be at least 32 characters in prod")
+        if len(self.WORKER_JOB_SIGNING_SECRET) < 32:
+            raise ValueError("WORKER_JOB_SIGNING_SECRET must be at least 32 characters in prod")
+        if not self.REDIS_PASSWORD:
+            raise ValueError("REDIS_PASSWORD is required in prod")
+        return self
 
     # 业务
     REVIEW_MAX_ROUNDS: int = 2
@@ -103,8 +124,8 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    """单例配置"""
-    return Settings()  # type: ignore[call-arg]
+    """单例配置 — required fields are filled from env / .env at runtime."""
+    return Settings()
 
 
 settings = get_settings()

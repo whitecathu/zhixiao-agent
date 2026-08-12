@@ -37,6 +37,15 @@ export const repositoryApi = {
 
 export const runApi = {
   approvals: (runId: number) => request<Approval[]>({ method: "GET", url: `/task-runs/${runId}/approvals` }),
+  requestApproval: (
+    runId: number,
+    operation: "destructive_command" | "git_publish" | "mcp" | "sub_agent" | "network_tools",
+    reason?: string,
+  ) => request<Approval>({
+    method: "POST",
+    url: `/task-runs/${runId}/approvals`,
+    data: { operation, reason },
+  }),
   decide: (approvalId: number, decision: "approved" | "rejected", comment?: string) =>
     request<Approval>({ method: "POST", url: `/approvals/${approvalId}/decision`, data: { decision, comment } }),
   artifacts: (runId: number) => request<Artifact[]>({ method: "GET", url: `/task-runs/${runId}/artifacts` }),

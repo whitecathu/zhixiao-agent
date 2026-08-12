@@ -45,8 +45,14 @@ def create_app() -> FastAPI:
         openapi_tags=[
             {"name": "认证", "description": "用户注册 / 登录 / 令牌管理"},
             {"name": "团队空间", "description": "空间与成员管理"},
-            {"name": "任务", "description": "任务创建 / 状态 / 控制"},
-            {"name": "SSE 执行流", "description": "实时流式输出"},
+            {
+                "name": "任务（旧版）",
+                "description": "已弃用；新客户端使用 /api/v1/task-runs 控制面",
+            },
+            {
+                "name": "SSE 执行流（旧版）",
+                "description": "已弃用；使用 /api/v1/tasks/{id}/events 可回放事件流",
+            },
             {"name": "知识", "description": "知识条目与混合检索"},
             {"name": "统计与回溯", "description": "工作台首页 / 链路回溯"},
         ],
@@ -61,7 +67,13 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=["X-Trace-Id", "X-Duration-Ms"],
+        expose_headers=[
+            "X-Trace-Id",
+            "X-Duration-Ms",
+            "Deprecation",
+            "Warning",
+            "Link",
+        ],
     )
     app.add_middleware(RateLimitMiddleware)
     app.add_middleware(TraceIdMiddleware)

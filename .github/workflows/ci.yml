@@ -35,7 +35,21 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - run: pip install --index-url https://pypi.org/simple -e "apps/api[test]"
+      - run: pip install --index-url https://pypi.org/simple -e packages/agent_core -e "apps/api[test]"
+      # Full style/type cleanup of legacy API code is tracked separately; gate on correctness.
+      - run: ruff check --config pyproject.toml --select E9,F63,F7,F82 apps/api/app apps/api/tests
+      # Broaden mypy gradually: core, schema, SSE, and the clean service subset are gated.
+      - run: >
+          mypy --config-file apps/api/mypy.ini --follow-imports=skip
+          apps/api/app/core
+          apps/api/app/schema
+          apps/api/app/router/sse.py
+          apps/api/app/service/auth_service.py
+          apps/api/app/service/space_service.py
+          apps/api/app/service/onboarding_service.py
+          apps/api/app/service/stats_service.py
+          apps/api/app/service/task_service.py
+          apps/api/app/service/knowledge_service.py
       - run: pytest -q
         working-directory: apps/api
 
@@ -68,19 +82,29 @@ jobs:
       - run: npm test
       - run: npm run build:prod
 
-  evaluation-manifest:
+  offline-evaluation-gates:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - run: pip install --index-url https://pypi.org/simple -e "packages/agent_core[dev]"
       - run: python -m unittest discover -s tests/evals -p "test_*.py"
       - run: python tests/evals/run_scenarios.py --validate-only --output evaluation-manifest.json
+      - run: python tests/evals/run_offline_gates.py
+      # Summarizes checked-in fixture evidence; this is not live model evaluation.
+      - run: |
+          python tests/evals/run_scenarios.py \
+            --results tests/evals/fixtures/offline_harness_results.json \
+            --output offline-fixture-report.json
       - uses: actions/upload-artifact@v4
         with:
-          name: evaluation-manifest
-          path: evaluation-manifest.json
+          name: offline-evaluation-gate-evidence
+          path: |
+            evaluation-manifest.json
+            offline-fixture-report.json
+            tests/evals/artifacts/offline_report.json
 
   security:
     runs-on: ubuntu-latest
@@ -95,7 +119,7 @@ jobs:
 
   containers:
     runs-on: ubuntu-latest
-    needs: [agent-core, api, worker, web, evaluation-manifest, security]
+    needs: [agent-core, api, worker, web, offline-evaluation-gates, security]
     steps:
       - uses: actions/checkout@v4
       - run: cp .env.example .env

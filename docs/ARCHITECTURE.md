@@ -9,18 +9,24 @@ flowchart LR
   A --> R[(Redis Streams)]
   R --> W["Worker"]
   W --> G["LangGraph runtime"]
+  W --> MG["MetaGPT Team runtime"]
   G --> T["Typed tool registry"]
-  T --> L["Local runner"]
+  MG --> T
+  T --> L["Bubblewrap / Local runner"]
   T --> D["Docker runner"]
   G --> V["Chroma / Milvus"]
   G --> N["Neo4j"]
   G --> M["OpenAI-compatible models"]
+  MG --> M
   A --> P["Prometheus"]
   P --> F["Grafana / SLO alerts"]
   W --> R
   A --> U
 ```
 
+Worker 默认运行 LangGraph；当 `RunJob.engine=metagpt`（或 Agent/仓库显式选择）时走 MetaGPT Team 垂直切片，事件契约与工具权限与 LangGraph 对齐。
+
+执行面默认使用 `bubblewrap`（Linux/Compose）或 Docker runner；`local` 仅用于可信开发，且 `execute/full` 必须显式开启 `ALLOW_UNSANDBOXED_LOCAL_EXECUTION`。Redis Job 经 HMAC 签名；`clone_approved`、`network_capabilities` 与 `ops_capabilities` 彼此独立，避免一次审批解锁多种高危能力。
 ## 执行状态机
 
 ```mermaid

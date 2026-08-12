@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
+import time
 from dataclasses import dataclass
 from typing import Protocol
 
 from app.core.config import settings
 from app.core.redis_client import RedisClient
+from zhixiao_agent.job_security import (
+    ISSUED_AT_FIELD,
+    NONCE_FIELD,
+    SIGNATURE_FIELD,
+    sign_job_fields,
+)
 
 RUN_QUEUE_KEY = "run:queue"
 
@@ -22,13 +30,20 @@ class RunJob:
     default_branch: str = "main"
     workspace: str = ""
     test_command: str = ""
-    approved: str = "true"
+    # Plan/run-start approval only — does not unlock destructive, publish, or network tools.
+    approved: str = "false"
+    ops_approved: str = "false"
+    ops_capabilities: str = "[]"
+    clone_approved: str = "false"
     network_approved: str = "false"
+    network_capabilities: str = "[]"
     workflow_definition: str = ""
     workflow_version: str = ""
+    engine: str = "langgraph"
+    roles_json: str = ""
 
     def fields(self) -> dict[str, str]:
-        return {
+        fields = {
             "run_id": self.run_id,
             "prompt": self.prompt,
             "permission_mode": self.permission_mode,
@@ -38,10 +53,21 @@ class RunJob:
             "workspace": self.workspace,
             "test_command": self.test_command,
             "approved": self.approved,
+            "ops_approved": self.ops_approved,
+            "ops_capabilities": self.ops_capabilities,
+            "clone_approved": self.clone_approved,
             "network_approved": self.network_approved,
+            "network_capabilities": self.network_capabilities,
             "workflow_definition": self.workflow_definition,
             "workflow_version": self.workflow_version,
+            "engine": self.engine,
+            "roles_json": self.roles_json,
+            ISSUED_AT_FIELD: str(int(time.time())),
+            NONCE_FIELD: secrets.token_hex(16),
         }
+        secret = settings.WORKER_JOB_SIGNING_SECRET or settings.WORKER_CALLBACK_TOKEN
+        fields[SIGNATURE_FIELD] = sign_job_fields(fields, secret)
+        return fields
 
 
 class JobStore(Protocol):

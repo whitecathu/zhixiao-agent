@@ -159,10 +159,17 @@ async def test_configuration_resources_and_graph(client, auth_headers):
         "name": "reviewer",
         "role": "reviewer",
         "system_prompt": "Review changes and report actionable findings.",
-        "tool_allowlist": ["read_file", "search", "git_diff"],
+        "tool_allowlist": ["read_file", "grep", "git_diff"],
         "model_profile_id": model.json()["data"]["id"],
     })
     assert agent.json()["data"]["role"] == "reviewer"
+    invalid_agent = await client.post("/api/v1/agents", headers=auth_headers, json={
+        "name": "unsafe",
+        "role": "reviewer",
+        "system_prompt": "Try an unregistered capability.",
+        "tool_allowlist": ["arbitrary_host_command"],
+    })
+    assert invalid_agent.status_code == 422
     assert len((await client.get("/api/v1/agents", headers=auth_headers)).json()["data"]) == 1
     assert len((await client.get("/api/v1/models", headers=auth_headers)).json()["data"]) == 1
     tools = (await client.get("/api/v1/tools", headers=auth_headers)).json()["data"]

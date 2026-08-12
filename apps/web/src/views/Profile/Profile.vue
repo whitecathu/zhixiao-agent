@@ -1,25 +1,53 @@
 <template>
-  <el-card class="card" v-loading="loading">
-    <el-tabs v-model="tab">
-      <el-tab-pane label="个人资料" name="info">
-        <el-descriptions :column="1" border>
-          <el-descriptions-item label="用户名">{{ user?.username }}</el-descriptions-item>
-          <el-descriptions-item label="邮箱">{{ user?.email }}</el-descriptions-item>
-          <el-descriptions-item label="昵称">
-            <el-input v-model="form.nickname" style="width:200px" />
-            <el-button size="small" type="primary" @click="saveProfile">保存</el-button>
-          </el-descriptions-item>
-        </el-descriptions>
-      </el-tab-pane>
-      <el-tab-pane label="修改密码" name="pwd">
-        <el-form :model="pwdForm" label-width="120">
-          <el-form-item label="原密码"><el-input v-model="pwdForm.old_password" type="password" show-password /></el-form-item>
-          <el-form-item label="新密码"><el-input v-model="pwdForm.new_password" type="password" show-password /></el-form-item>
-          <el-form-item><el-button type="primary" :loading="saving" @click="savePwd">提交</el-button></el-form-item>
-        </el-form>
-      </el-tab-pane>
-    </el-tabs>
-  </el-card>
+  <section class="page-stack" v-loading="loading">
+    <header class="page-heading">
+      <div>
+        <p class="eyebrow">ACCOUNT</p>
+        <h1>个人设置</h1>
+        <p>管理资料与登录凭证，变更仅作用于当前账号。</p>
+      </div>
+    </header>
+
+    <el-card shadow="never" class="profile-card">
+      <el-tabs v-model="tab" class="profile-tabs">
+        <el-tab-pane label="个人资料" name="info">
+          <dl class="profile-list">
+            <div>
+              <dt>用户名</dt>
+              <dd>{{ user?.username || "—" }}</dd>
+            </div>
+            <div>
+              <dt>邮箱</dt>
+              <dd>{{ user?.email || "—" }}</dd>
+            </div>
+            <div class="nickname-row">
+              <dt>昵称</dt>
+              <dd>
+                <el-input v-model="form.nickname" placeholder="显示名称" class="nickname-input" />
+                <el-button type="primary" @click="saveProfile">保存</el-button>
+              </dd>
+            </div>
+          </dl>
+          <p class="muted note">昵称变更会先写入本地会话；如需持久化请在认证模块启用资料更新接口。</p>
+        </el-tab-pane>
+
+        <el-tab-pane label="修改密码" name="pwd">
+          <el-form :model="pwdForm" label-position="top" class="pwd-form">
+            <el-form-item label="原密码">
+              <el-input v-model="pwdForm.old_password" type="password" show-password autocomplete="current-password" />
+            </el-form-item>
+            <el-form-item label="新密码">
+              <el-input v-model="pwdForm.new_password" type="password" show-password autocomplete="new-password" />
+            </el-form-item>
+            <el-form-item>
+              <el-button type="primary" :loading="saving" @click="savePwd">提交</el-button>
+            </el-form-item>
+          </el-form>
+          <p class="muted note">新密码至少 8 位。</p>
+        </el-tab-pane>
+      </el-tabs>
+    </el-card>
+  </section>
 </template>
 
 <script setup lang="ts">
@@ -51,15 +79,69 @@ async function savePwd() {
   try {
     await authApi.changePassword({ ...pwdForm });
     ElMessage.success("密码已修改");
-    pwdForm.old_password = ""; pwdForm.new_password = "";
-  } finally { saving.value = false; }
+    pwdForm.old_password = "";
+    pwdForm.new_password = "";
+  } finally {
+    saving.value = false;
+  }
 }
 
 onMounted(async () => {
-  if (!userStore.user) await userStore.refreshMe();
+  if (!userStore.user) {
+    loading.value = true;
+    try {
+      await userStore.refreshMe();
+    } finally {
+      loading.value = false;
+    }
+  }
+  if (userStore.user?.nickname) form.nickname = userStore.user.nickname;
 });
 </script>
 
 <style scoped lang="scss">
-.card { max-width: 720px; }
+.profile-card {
+  max-width: 720px;
+}
+
+.profile-list {
+  margin: 0;
+}
+
+.profile-list > div {
+  display: grid;
+  grid-template-columns: 100px 1fr;
+  gap: 12px;
+  align-items: center;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.profile-list dt {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.profile-list dd {
+  margin: 0;
+}
+
+.nickname-row dd {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.nickname-input {
+  max-width: 280px;
+}
+
+.pwd-form {
+  max-width: 420px;
+}
+
+.note {
+  margin-top: 16px;
+}
 </style>

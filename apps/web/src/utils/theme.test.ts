@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { applyTheme, getPreferredTheme, isDarkTheme } from "./theme";
+import {
+  applyTheme,
+  designTokens,
+  getPreferredTheme,
+  getSurfaceTokens,
+  isDarkTheme,
+  surfaceTokens,
+} from "./theme";
 
 describe("theme", () => {
   beforeEach(() => {
@@ -30,5 +37,18 @@ describe("theme", () => {
   it("restores stored preference over system default", () => {
     localStorage.setItem("zhixiao-theme", "dark");
     expect(getPreferredTheme()).toBe("dark");
+  });
+
+  it("exposes green brand and status design tokens", () => {
+    expect(designTokens.brand.DEFAULT).toBe("#287d3c");
+    expect(designTokens.status.running).toMatch(/^#/);
+    expect(designTokens.spacing[4]).toBe(16);
+    expect(designTokens.font.sans).toContain("Segoe UI");
+  });
+
+  it("returns coherent surface tokens for light and dark", () => {
+    expect(getSurfaceTokens("light").surface).toBe(surfaceTokens.light.surface);
+    applyTheme("dark");
+    expect(getSurfaceTokens().mainBg).toBe(surfaceTokens.dark.mainBg);
   });
 });

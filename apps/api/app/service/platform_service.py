@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
@@ -42,6 +43,7 @@ from app.model.user import SpaceMember
 from app.schema.platform import (
     AgentUpdate,
     ApprovalDecision,
+    ApprovalRequest,
     KnowledgeEntityOut,
     KnowledgeEvidenceLink,
     KnowledgeGraphExplore,
@@ -60,6 +62,39 @@ ModelT = TypeVar("ModelT", bound=Base)
 
 def utcnow() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
+
+
+def _managed_workspace_path(value: str, *, label: str) -> str:
+    """Validate local repository/workspace paths against API-visible managed roots."""
+    candidate = Path(value).expanduser().resolve(strict=True)
+    if not candidate.is_dir():
+        raise BizException(
+            ErrorCode.PARAM_INVALID,
+            message=f"{label} 必须是已存在目录",
+            http_status=422,
+        )
+    configured = [
+        item.strip()
+        for item in settings.WORKSPACE_SOURCE_ROOTS.split(os.pathsep)
+        if item.strip()
+    ]
+    roots = [Path(item).expanduser().resolve() for item in configured]
+    roots.append(Path(settings.RUNNER_ROOT).expanduser().resolve())
+    if not any(_is_relative_to(candidate, root) for root in roots):
+        raise BizException(
+            ErrorCode.AUTH_PERMISSION_DENIED,
+            message=f"{label} 不在受管工作区根目录内",
+            http_status=403,
+        )
+    return str(candidate)
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 class PlatformService:
@@ -126,6 +161,11 @@ class PlatformService:
         self, space_id: int, user_id: int, payload: BaseModel
     ) -> Repository:
         data = payload.model_dump(exclude_unset=True)
+        if data.get("root_path") and settings.APP_ENV != "test":
+            data["root_path"] = _managed_workspace_path(
+                str(data["root_path"]),
+                label="repository.root_path",
+            )
         repository = Repository(space_id=space_id, owner_id=user_id, **data)
         self.session.add(repository)
         await self.session.commit()
@@ -295,10 +335,24 @@ class PlatformService:
         return workflow
 
     async def update_agent(
-        self, agent_id: int, space_id: int, payload: AgentUpdate
+        self,
+        agent_id: int,
+        space_id: int,
+        user_id: int,
+        payload: AgentUpdate,
     ) -> AgentDefinition:
         agent = await self.get_scoped(AgentDefinition, agent_id, space_id)
         data = payload.model_dump(exclude_unset=True)
+        role = str(data.get("role") or agent.role)
+        tools = set(data.get("tool_allowlist") or agent.tool_allowlist or [])
+        if role in {"metagpt", "team", "metagpt_team"} or tools & {
+            "terminal",
+            "background_command",
+            "mcp",
+            "sub_agent",
+            "open_pull_request",
+        }:
+            await self.require_space_admin(space_id, user_id)
         if data.get("model_profile_id") is not None:
             from app.model.platform import ModelProfile
 
@@ -383,6 +437,11 @@ class PlatformService:
     ) -> Workspace:
         await self.get_scoped(Repository, repository_id, space_id)
         data = payload.model_dump()
+        if settings.APP_ENV != "test":
+            data["root_path"] = _managed_workspace_path(
+                str(data["root_path"]),
+                label="workspace.root_path",
+            )
         if data.get("task_run_id") is not None:
             run = await self.get_run(data["task_run_id"], space_id)
             if run.repository_id != repository_id:
@@ -419,6 +478,74 @@ class PlatformService:
         )
         return list(result.scalars().all())
 
+    async def request_approval(
+        self,
+        run_id: int,
+        space_id: int,
+        user_id: int,
+        payload: ApprovalRequest,
+    ) -> Approval:
+        run = await self.get_run(run_id, space_id)
+        if payload.operation in {
+            "destructive_command",
+            "git_publish",
+            "mcp",
+            "sub_agent",
+        } and run.permission_mode != "full":
+            raise BizException(
+                ErrorCode.AUTH_PERMISSION_DENIED,
+                message="该高风险操作要求任务使用 full 权限",
+                http_status=403,
+            )
+        if payload.operation == "git_publish":
+            if run.status != "succeeded" or not (run.diff_text or "").strip():
+                raise BizException(
+                    ErrorCode.TASK_STATE_INVALID,
+                    message="仅已成功且包含 Diff 的任务可请求发布审批",
+                    http_status=409,
+                )
+        pending = await self.session.scalar(
+            select(Approval.id).where(
+                Approval.task_run_id == run.id,
+                Approval.operation == payload.operation,
+                Approval.status == "pending",
+                Approval.deleted_at.is_(None),
+            )
+        )
+        if pending is not None:
+            raise BizException(
+                ErrorCode.TASK_STATE_INVALID,
+                message="相同操作已有待审批记录",
+                http_status=409,
+            )
+        reasons = {
+            "destructive_command": "Allow one destructive command capability for this run",
+            "git_publish": "Publish the verified diff as a pull request",
+            "mcp": "Allow configured MCP tools for this run",
+            "sub_agent": "Allow a read-only nested agent for this run",
+            "network_tools": "Allow web search and fetch tools for this run",
+        }
+        approval = Approval(
+            task_run_id=run.id,
+            operation=payload.operation,
+            reason=payload.reason or reasons[payload.operation],
+            requested_by=user_id,
+            status="pending",
+        )
+        self.session.add(approval)
+        await self.session.commit()
+        await self.session.refresh(approval)
+        await self.events.publish(
+            str(run.id),
+            "approval.requested",
+            {
+                "run_id": run.id,
+                "approval_id": approval.id,
+                "operation": approval.operation,
+            },
+        )
+        return approval
+
     async def decide_approval(
         self,
         approval_id: int,
@@ -437,25 +564,51 @@ class PlatformService:
         if approval.status != "pending":
             raise BizException(ErrorCode.TASK_STATE_INVALID, message="审批已处理", http_status=409)
 
+        start_operations = {"execute_task", "execute_task_network_clone"}
+        capability_operations = {
+            "destructive_command",
+            "git_publish",
+            "mcp",
+            "sub_agent",
+            "network_tools",
+        }
+        is_start = approval.operation in start_operations
+        is_capability = approval.operation in capability_operations
+        if (
+            payload.decision == "approved"
+            and is_capability
+            and run.status not in {"succeeded", "interrupted"}
+        ):
+            raise BizException(
+                ErrorCode.TASK_STATE_INVALID,
+                message="能力型审批只能在任务成功或中断后重新入队",
+                http_status=409,
+            )
+
         approval.status = payload.decision
         approval.comment = payload.comment
         approval.decided_by = user_id
         approval.decided_at = utcnow()
+        event_name = "approval.decided"
         if payload.decision == "approved":
-            run.status = "queued"
-            event_name = "run.queued"
-        else:
+            if is_start or is_capability:
+                run.status = "queued"
+                event_name = "run.queued"
+        elif is_start:
+            # Only start approvals cancel the run; capability denials leave status alone.
             run.status = "cancelled"
             run.finished_at = utcnow()
             event_name = "run.cancelled"
+        else:
+            event_name = "approval.rejected"
         await self.session.commit()
         if approval.decided_at is not None and approval.created_at is not None:
             record_approval(
                 approval.status,
                 max((approval.decided_at - approval.created_at).total_seconds(), 0.0),
             )
-        if payload.decision == "approved":
-            await self._enqueue_run(run)
+        if payload.decision == "approved" and (is_start or is_capability):
+            await self._enqueue_run(run, approval=approval)
         await self.session.refresh(approval)
         await self.events.publish(
             str(run.id),
@@ -466,14 +619,17 @@ class PlatformService:
                 "decision": approval.status,
             },
         )
-        await self.events.publish(
-            str(run.id),
-            event_name,
-            {
-                "run_id": run.id,
-                "status": run.status,
-            },
-        )
+        if event_name != "approval.decided":
+            await self.events.publish(
+                str(run.id),
+                event_name,
+                {
+                    "run_id": run.id,
+                    "status": run.status,
+                    "approval_id": approval.id,
+                    "operation": approval.operation,
+                },
+            )
         return approval
 
     async def interrupt_run(self, run_id: int, space_id: int) -> TaskRun:
@@ -483,6 +639,11 @@ class PlatformService:
         run.status = "interrupted"
         await self.session.commit()
         await self.session.refresh(run)
+        # Signal in-flight workers to cancel the asyncio task / runner.
+        from app.core.redis_client import RedisClient
+
+        client = await RedisClient.get()
+        await client.set(f"run:control:{run.id}", "stop", ex=3_600)
         await self.events.publish(
             str(run.id),
             "run.interrupted",
@@ -499,6 +660,10 @@ class PlatformService:
             raise BizException(ErrorCode.TASK_STATE_INVALID, http_status=409)
         run.status = "queued"
         await self.session.commit()
+        from app.core.redis_client import RedisClient
+
+        client = await RedisClient.get()
+        await client.delete(f"run:control:{run.id}")
         await self._enqueue_run(run)
         await self.session.refresh(run)
         await self.events.publish(
@@ -511,7 +676,7 @@ class PlatformService:
         )
         return run
 
-    async def _enqueue_run(self, run: TaskRun) -> None:
+    async def _enqueue_run(self, run: TaskRun, *, approval: Approval | None = None) -> None:
         repository = await self.get_scoped(Repository, run.repository_id, run.space_id)
         workspace_result = await self.session.execute(
             select(Workspace)
@@ -540,24 +705,88 @@ class PlatformService:
                 workflow.definition, ensure_ascii=False, separators=(",", ":")
             )
             workflow_version = str(run.workflow_version or workflow.version)
+        engine = "langgraph"
+        roles_json = ""
+        if run.agent_id is not None:
+            agent = await self.get_scoped(AgentDefinition, run.agent_id, run.space_id)
+            roles_json = json.dumps(
+                [
+                    {
+                        "name": agent.name,
+                        "profile": agent.role,
+                        "goal": agent.system_prompt,
+                        "tools": agent.tool_allowlist or [
+                            "list_directory",
+                            "read_file",
+                            "grep",
+                            "git_status",
+                        ],
+                        "watch": [],
+                    }
+                ],
+                ensure_ascii=False,
+            )
+            if agent.role in {"metagpt", "team", "metagpt_team"}:
+                engine = "metagpt"
+        operation = approval.operation if approval is not None else "execute_task"
+        if approval is None:
+            prior = await self.session.scalar(
+                select(Approval)
+                .where(Approval.task_run_id == run.id, Approval.status == "approved")
+                .order_by(Approval.id.desc())
+                .limit(1)
+            )
+            if prior is not None:
+                operation = prior.operation
+        # Plan/run-start approval unlocks the agent loop, not destructive/network ops.
+        plan_approved = "true"
+        capability_by_operation = {
+            "destructive_command": "destructive_command",
+            "git_publish": "git_publish",
+            "mcp": "mcp",
+            "sub_agent": "sub_agent",
+        }
+        capability = capability_by_operation.get(operation)
+        ops_capabilities = [capability] if capability else []
+        ops_approved = "true" if ops_capabilities else "false"
+        clone_approved = "true" if operation == "execute_task_network_clone" else "false"
+        network_capability_by_operation = {
+            "network_tools": "web",
+            "git_publish": "git_publish",
+            "mcp": "mcp",
+        }
+        network_capability = network_capability_by_operation.get(operation)
+        network_capabilities = [network_capability] if network_capability else []
+        # Clone approval is deliberately not reusable by web/MCP/PR network tools.
+        network_approved = "true" if network_capabilities else "false"
+        job_prompt = run.prompt
+        if operation == "git_publish":
+            job_prompt = (
+                f"{run.prompt}\n\n"
+                "Operator follow-up: do not modify files. Open a pull request for the "
+                "existing verified workspace diff using open_pull_request."
+            )
         try:
             message_id = await self.queue.enqueue(
                 RunJob(
                     run_id=str(run.id),
-                    prompt=run.prompt,
+                    prompt=job_prompt,
                     permission_mode=run.permission_mode,
                     repository_root=repository.root_path or "",
                     clone_url=repository.clone_url or "",
                     default_branch=repository.default_branch,
                     workspace=workspace.root_path if workspace else "",
                     test_command=test_command,
+                    approved=plan_approved,
+                    ops_approved=ops_approved,
+                    ops_capabilities=json.dumps(ops_capabilities),
+                    clone_approved=clone_approved,
+                    network_approved=network_approved,
+                    network_capabilities=json.dumps(network_capabilities),
                     workflow_definition=workflow_definition,
                     workflow_version=workflow_version,
-                    network_approved=str(
-                        bool(
-                            repository.clone_url and not repository.root_path and workspace is None
-                        )
-                    ).lower(),
+                    engine=engine,
+                    roles_json=roles_json,
                 )
             )
         except Exception as exc:

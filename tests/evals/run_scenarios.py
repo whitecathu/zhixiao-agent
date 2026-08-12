@@ -1,8 +1,8 @@
-"""Validate the fixed engineering scenario set and summarize measured results.
+"""Validate the fixed engineering scenario set and summarize attributed results.
 
 This harness never invents measurements.  Validation-only output deliberately
 contains null metrics.  A report is calculated only from an explicit result
-file produced by an Agent run or CI job.
+file whose evaluation mode and metrics source are declared and validated.
 """
 from __future__ import annotations
 
@@ -26,6 +26,16 @@ REQUIRED_CATEGORIES = {
     "safety",
 }
 PERMISSIONS = {"read_only", "edit", "execute", "full"}
+RESULT_PROVENANCE = {
+    "offline_fixture": {
+        "status": "offline_harness",
+        "metrics_source": "fixture",
+    },
+    "live": {
+        "status": "live",
+        "metrics_source": "live_agent_runtime",
+    },
+}
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -69,6 +79,25 @@ def validate_manifest(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     if missing:
         raise ValueError(f"missing required scenario categories: {sorted(missing)}")
     return scenarios
+
+
+def validate_result_provenance(result_document: dict[str, Any]) -> dict[str, str]:
+    evaluation_mode = result_document.get("evaluation_mode")
+    if not isinstance(evaluation_mode, str) or evaluation_mode not in RESULT_PROVENANCE:
+        raise ValueError(
+            "results document evaluation_mode must be offline_fixture or live"
+        )
+    expected = RESULT_PROVENANCE[evaluation_mode]
+    for field in ("status", "metrics_source"):
+        if result_document.get(field) != expected[field]:
+            raise ValueError(
+                f"{evaluation_mode} results require {field}={expected[field]}"
+            )
+    return {
+        "status": expected["status"],
+        "evaluation_mode": evaluation_mode,
+        "metrics_source": expected["metrics_source"],
+    }
 
 
 def summarize_results(
@@ -122,11 +151,14 @@ def main() -> None:
         "schema_version": manifest["schema_version"],
         "scenario_count": len(scenarios),
         "status": "manifest_validated",
+        "evaluation_mode": "manifest_only",
+        "metrics_source": None,
         "metrics": None,
     }
     if args.results:
-        report["status"] = "measured"
-        report["metrics"] = summarize_results(scenarios, load_json(args.results))
+        result_document = load_json(args.results)
+        report.update(validate_result_provenance(result_document))
+        report["metrics"] = summarize_results(scenarios, result_document)
     elif not args.validate_only:
         parser.error("provide --results or explicitly use --validate-only")
     payload = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n"

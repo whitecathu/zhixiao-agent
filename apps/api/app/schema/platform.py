@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
@@ -34,6 +35,12 @@ class RepositoryCreate(BaseModel):
     def require_source(self) -> RepositoryCreate:
         if not self.clone_url and not self.root_path:
             raise ValueError("clone_url or root_path is required")
+        if self.clone_url:
+            parsed = urlsplit(self.clone_url)
+            if parsed.scheme != "https" or not parsed.hostname:
+                raise ValueError("clone_url must be an HTTPS repository URL")
+            if parsed.username or parsed.password:
+                raise ValueError("clone_url must not contain embedded credentials")
         return self
 
 
@@ -148,6 +155,17 @@ class ApprovalDecision(BaseModel):
     comment: str | None = Field(default=None, max_length=512)
 
 
+class ApprovalRequest(BaseModel):
+    operation: Literal[
+        "destructive_command",
+        "git_publish",
+        "mcp",
+        "sub_agent",
+        "network_tools",
+    ]
+    reason: str | None = Field(default=None, min_length=3, max_length=512)
+
+
 class ApprovalOut(ORMOut):
     task_run_id: int
     operation: str
@@ -201,6 +219,20 @@ WORKFLOW_TOOLS = frozenset(
         "sub_agent",
         "knowledge_search",
         "mcp",
+        "open_pull_request",
+    }
+)
+AGENT_ROLES = frozenset(
+    {
+        "planner",
+        "explorer",
+        "implementer",
+        "tester",
+        "reviewer",
+        "knowledge",
+        "metagpt",
+        "team",
+        "metagpt_team",
     }
 )
 
@@ -374,9 +406,14 @@ class AgentCreate(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     role: str = Field(min_length=1, max_length=64)
     system_prompt: str = Field(min_length=1)
-    tool_allowlist: list[str] = Field(default_factory=list)
+    tool_allowlist: list[str] = Field(default_factory=list, max_length=32)
     model_profile_id: int | None = None
     enabled: bool = True
+
+    @model_validator(mode="after")
+    def validate_agent(self) -> AgentCreate:
+        _validate_agent_role_and_tools(self.role, self.tool_allowlist)
+        return self
 
 
 class AgentOut(ORMOut):
@@ -394,7 +431,7 @@ class AgentUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
     role: str | None = Field(default=None, min_length=1, max_length=64)
     system_prompt: str | None = Field(default=None, min_length=1)
-    tool_allowlist: list[str] | None = None
+    tool_allowlist: list[str] | None = Field(default=None, max_length=32)
     model_profile_id: int | None = None
     enabled: bool | None = None
 
@@ -402,7 +439,20 @@ class AgentUpdate(BaseModel):
     def require_changes(self) -> AgentUpdate:
         if not self.model_fields_set:
             raise ValueError("at least one agent field is required")
+        _validate_agent_role_and_tools(self.role, self.tool_allowlist)
         return self
+
+
+def _validate_agent_role_and_tools(role: str | None, tools: list[str] | None) -> None:
+    if role is not None and role not in AGENT_ROLES:
+        raise ValueError(f"unknown agent role: {role}")
+    if tools is None:
+        return
+    unknown = sorted(set(tools) - WORKFLOW_TOOLS)
+    if unknown:
+        raise ValueError(f"unknown agent tools: {', '.join(unknown)}")
+    if len(set(tools)) != len(tools):
+        raise ValueError("agent tool_allowlist must be unique")
 
 
 class ModelProfileCreate(BaseModel):

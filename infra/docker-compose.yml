@@ -11,9 +11,9 @@ x-app-env: &app-env
   MYSQL_DATABASE: ${MYSQL_DATABASE:-zhixiao}
   REDIS_HOST: redis
   REDIS_PORT: 6379
-  REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+  REDIS_PASSWORD: ${REDIS_PASSWORD:-change_redis_me}
   REDIS_DB: 0
-  REDIS_URL: redis://redis:6379/0
+  REDIS_URL: redis://:${REDIS_PASSWORD:-change_redis_me}@redis:6379/0
   CHROMA_HOST: chroma
   CHROMA_PORT: 8000
   MILVUS_URI: http://milvus:19530
@@ -31,6 +31,7 @@ x-app-env: &app-env
   RUNNER_ROOT: /workspace/runs
   COMMAND_TIMEOUT_SECONDS: ${COMMAND_TIMEOUT_SECONDS:-120}
   WORKER_CALLBACK_TOKEN: ${WORKER_CALLBACK_TOKEN:-replace-worker-callback-token}
+  WORKER_JOB_SIGNING_SECRET: ${WORKER_JOB_SIGNING_SECRET:-replace-worker-job-signing-secret}
   OBSERVABILITY_WINDOW_DAYS: ${OBSERVABILITY_WINDOW_DAYS:-30}
   SLO_TASK_SUCCESS_RATE_TARGET: ${SLO_TASK_SUCCESS_RATE_TARGET:-0.80}
   SLO_FIRST_PASS_RATE_TARGET: ${SLO_FIRST_PASS_RATE_TARGET:-0.60}
@@ -58,11 +59,16 @@ services:
   redis:
     image: redis:7.4-alpine
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-change_redis_me}
+    command:
+      - sh
+      - -c
+      - exec redis-server --appendonly yes --maxmemory-policy noeviction --requirepass "$$REDIS_PASSWORD"
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep PONG"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -182,10 +188,11 @@ services:
     restart: unless-stopped
     environment:
       <<: *app-env
-      RUNNER_BACKEND: local
+      RUNNER_BACKEND: bubblewrap
       RUNNER_NETWORK: none
       API_BASE_URL: http://api:8000/api/v1
       WORKSPACE_BASE: /workspace/runs
+      WORKSPACE_SOURCE_ROOTS: /workspace/runs
       ZHIXIAO_STATE_DIR: /workspace/runs/.zhixiao-state
     volumes:
       - workspaces:/workspace/runs

@@ -1,10 +1,15 @@
 <template>
-  <section class="page-stack">
+  <section class="page-shell">
     <header class="page-heading">
-      <div><p class="eyebrow">ENGINEERING RUNS</p><h1>工程任务</h1><p>从目标到可应用 Diff 的完整 Agent 执行记录。</p></div>
+      <div>
+        <p class="eyebrow">ENGINEERING RUNS</p>
+        <h1>工程任务</h1>
+        <p>从目标到可应用 Diff 的完整 Agent 执行记录。</p>
+      </div>
       <el-button type="primary" @click="dialogVisible = true">新建任务</el-button>
     </header>
-    <el-card shadow="never">
+
+    <el-card shadow="never" class="list-card table-chrome">
       <div class="ops">
         <el-input
           v-model="filter.keyword"
@@ -182,7 +187,28 @@ async function submit() {
 </script>
 
 <style scoped lang="scss">
-.ops { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
-.search-input { flex: 1; min-width: 220px; max-width: 420px; }
-.option-path { float: right; color: var(--text-muted); margin-left: 24px; }
+.list-card {
+  padding-bottom: var(--space-2);
+}
+
+.ops {
+  display: flex;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.search-input {
+  flex: 1;
+  min-width: 220px;
+  max-width: 420px;
+}
+
+.option-path {
+  float: right;
+  color: var(--text-muted);
+  margin-left: var(--space-6);
+  font-size: var(--text-xs);
+}
 </style>

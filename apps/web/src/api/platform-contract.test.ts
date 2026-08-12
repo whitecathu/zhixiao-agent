@@ -36,6 +36,11 @@ describe("platform API contract", () => {
   });
 
   it("uses the approval decision resource and unified diff response", async () => {
+    await runApi.requestApproval(12, "git_publish", "Open the verified PR");
+    expect(requestMock).toHaveBeenLastCalledWith({
+      method: "POST", url: "/task-runs/12/approvals",
+      data: { operation: "git_publish", reason: "Open the verified PR" },
+    });
     await runApi.decide(31, "approved", "Proceed");
     expect(requestMock).toHaveBeenLastCalledWith({
       method: "POST", url: "/approvals/31/decision",

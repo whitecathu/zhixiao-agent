@@ -18,7 +18,8 @@ os.environ.setdefault("MYSQL_USER", "u")
 os.environ.setdefault("MYSQL_PASSWORD", "p")
 os.environ.setdefault("MYSQL_DATABASE", "d")
 os.environ.setdefault("REDIS_HOST", "localhost")
-os.environ.setdefault("WORKER_CALLBACK_TOKEN", "test-worker-token")
+os.environ.setdefault("WORKER_CALLBACK_TOKEN", "test-worker-token-at-least-24-chars")
+os.environ.setdefault("WORKER_JOB_SIGNING_SECRET", "test-worker-signing-secret-at-least-24-chars")
 
 from app.db import session as session_mod  # noqa: E402
 from app.db.session import Base  # noqa: E402

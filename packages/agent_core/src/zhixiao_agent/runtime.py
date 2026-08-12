@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import uuid
-from collections.abc import AsyncIterator, Hashable
+from collections.abc import AsyncIterator, Awaitable, Callable, Hashable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,12 +14,15 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
+from .context_compact import maybe_compact_messages
 from .instructions import discover_instructions, render_instructions
 from .model import CodingModel
-from .routing import classify_task, route_task
-from .runner import DockerRunner, LocalRunner, Runner
+from .routing import classify_task, route_task, with_experimental_tools
+from .runner import BubblewrapRunner, DockerRunner, LocalRunner, Runner
+from .skills import SkillManager, default_skill_roots, render_skill_context
 from .tools import ToolContext, ToolRegistry, build_default_registry
 from .tools.git import WorktreeManager
+from .tools.registry import READ_ONLY_TOOLS
 from .types import (
     AgentEvent,
     Artifact,
@@ -29,6 +33,10 @@ from .types import (
     ToolStatus,
 )
 from .workflow import WorkflowDefinition, WorkflowNode
+
+_MAX_EVENTS_IN_STATE = 40
+_MAX_TOOL_RESULT_CHARS = 4_000
+EventSink = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 class AgentState(TypedDict, total=False):
@@ -53,6 +61,10 @@ class AgentState(TypedDict, total=False):
     diff: str
     error: str | None
     approved: bool
+    ops_approved: bool
+    ops_capabilities: list[str]
+    network_approved: bool
+    network_capabilities: list[str]
     require_plan_approval: bool
     _had_tool_calls: bool
     source_workspace: str
@@ -69,16 +81,24 @@ class RuntimeConfig:
     command_timeout: int = 120
     require_plan_approval: bool = True
     approved: bool = False
+    ops_approved: bool = False
+    ops_capabilities: frozenset[str] = frozenset()
+    network_approved: bool = False
+    network_capabilities: frozenset[str] = frozenset()
     test_command: str | None = None
     docker_image: str = "python:3.11-slim"
     isolate_worktree: bool = True
     workflow_definition: dict[str, Any] | None = None
     workflow_version: int | None = None
+    on_event: EventSink | None = None
+    tool_metadata: dict[str, Any] | None = None
+    skills_roots: tuple[Path, ...] | None = None
 
 
 _SYSTEM_PROMPT = """You are Zhixiao, an auditable software-engineering agent.
 Work only inside the supplied workspace. Obey project instructions and permission boundaries.
 Use tools to inspect facts before changing code. Keep changes scoped to the request.
+When knowledge_search returns hits, cite evidence ids/paths; if degraded, say evidence is missing.
 Never claim completion before verification. Return a concise final summary when no tool is needed.
 Tool errors include recovery guidance; diagnose before retrying and stop after repeated root causes.
 """
@@ -102,19 +122,47 @@ class AgentRuntime:
     @staticmethod
     def _emit(state: AgentState, event: str, data: dict[str, Any]) -> list[dict[str, Any]]:
         events = list(state.get("events", []))
+        sequence = int(events[-1]["sequence"]) + 1 if events else 1
         events.append(
             AgentEvent(
-                sequence=len(events) + 1,
+                sequence=sequence,
                 run_id=state["run_id"],
                 event=event,
                 data=data,
             ).model_dump(mode="json")
         )
+        if len(events) > _MAX_EVENTS_IN_STATE:
+            events = events[-_MAX_EVENTS_IN_STATE :]
         return events
 
+    def _tool_context(
+        self, workspace: Path, state: AgentState, config: RuntimeConfig
+    ) -> ToolContext:
+        return ToolContext(
+            workspace=workspace,
+            permission=PermissionMode(state["permission"]),
+            runner=self._runner(workspace, config),
+            approved=bool(state.get("approved", False)),
+            ops_approved=bool(state.get("ops_approved", False)),
+            ops_capabilities=frozenset(state.get("ops_capabilities", [])),
+            network_approved=bool(state.get("network_approved", False)),
+            network_capabilities=frozenset(state.get("network_capabilities", [])),
+            metadata=dict(config.tool_metadata or {}),
+        )
+
     def _runner(self, workspace: Path, config: RuntimeConfig) -> Runner:
+        runner_network_enabled = "git_publish" in config.network_capabilities
         if config.runner_backend == "docker":
-            return DockerRunner(workspace, image=config.docker_image)
+            return DockerRunner(
+                workspace,
+                image=config.docker_image,
+                network="bridge" if runner_network_enabled else "none",
+            )
+        if config.runner_backend == "bubblewrap":
+            return BubblewrapRunner(
+                workspace,
+                network_enabled=runner_network_enabled,
+            )
         if config.runner_backend != "local":
             raise ValueError(f"unsupported runner backend: {config.runner_backend}")
         return LocalRunner(workspace)
@@ -125,11 +173,25 @@ class AgentRuntime:
         async def intake(state: AgentState) -> AgentState:
             task_type = classify_task(state["prompt"])
             route = route_task(task_type)
+            allowed = set(
+                with_experimental_tools(
+                    route.tools,
+                    ops_capabilities=frozenset(state.get("ops_capabilities", [])),
+                    include_mcp=runtime.registry.get("mcp") is not None,
+                    include_sub_agent=runtime.registry.get("sub_agent") is not None,
+                )
+            )
+            if (
+                runtime.registry.get("open_pull_request") is not None
+                and "git_publish" in state.get("ops_capabilities", [])
+            ):
+                allowed.add("open_pull_request")
+            sorted_allowed = sorted(allowed)
             return {
                 **state,
                 "task_type": task_type.value,
-                "allowed_tools": sorted(route.tools),
-                "route_allowed_tools": sorted(route.tools),
+                "allowed_tools": sorted_allowed,
+                "route_allowed_tools": sorted_allowed,
                 "agents": list(route.agents),
                 "status": RunStatus.PLANNING.value,
                 "events": runtime._emit(
@@ -145,11 +207,7 @@ class AgentRuntime:
 
         async def discover(state: AgentState) -> AgentState:
             workspace = Path(state["workspace"])
-            context = ToolContext(
-                workspace=workspace,
-                permission=PermissionMode(state["permission"]),
-                runner=runtime._runner(workspace, config),
-            )
+            context = runtime._tool_context(workspace, state, config)
             listing = await runtime.registry.execute(
                 "list_directory",
                 {"path": ".", "recursive": False, "limit": 200},
@@ -157,24 +215,44 @@ class AgentRuntime:
                 allowed=set(state["allowed_tools"]),
             )
             instructions = render_instructions(discover_instructions(workspace), workspace)
+            skills = SkillManager(
+                default_skill_roots(workspace, extra=config.skills_roots)
+            )
+            skills.load()
+            skill_context = render_skill_context(state["prompt"], skills)
             project_context = (
                 f"Project files:\n{json.dumps(listing.data, ensure_ascii=False)}\n\n"
                 f"Project instructions:\n{instructions or '(none)'}"
             )
+            if skill_context:
+                project_context = f"{project_context}\n\n{skill_context}"
             return {
                 **state,
                 "project_context": project_context,
                 "events": runtime._emit(
                     state,
                     "repository_discovered",
-                    {"entries": len(listing.data or []), "instruction_chars": len(instructions)},
+                    {
+                        "entries": len(listing.data or []),
+                        "instruction_chars": len(instructions),
+                        "skill_chars": len(skill_context),
+                    },
                 ),
             }
 
         async def plan(state: AgentState) -> AgentState:
+            workspace = Path(state["workspace"])
+            skills = SkillManager(
+                default_skill_roots(workspace, extra=config.skills_roots)
+            )
+            skills.load()
+            skill_context = render_skill_context(state["prompt"], skills)
+            system_prompt = (
+                f"{_SYSTEM_PROMPT}\n\n{skill_context}" if skill_context else _SYSTEM_PROMPT
+            )
             response = await runtime.model.complete(
                 [
-                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {
                         "role": "user",
                         "content": (
@@ -200,7 +278,7 @@ class AgentRuntime:
                 **state,
                 "plan": steps,
                 "messages": [
-                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {
                         "role": "user",
                         "content": (
@@ -290,19 +368,13 @@ class AgentRuntime:
 
         async def execute(state: AgentState) -> AgentState:
             workspace = Path(state["workspace"])
-            permission = PermissionMode(state["permission"])
-            context = ToolContext(
-                workspace=workspace,
-                permission=permission,
-                runner=runtime._runner(workspace, config),
-                approved=state["approved"],
-                metadata={},
-            )
+            context = runtime._tool_context(workspace, state, config)
+            messages_in = maybe_compact_messages(list(state["messages"]))
             turn = await runtime.model.complete(
-                state["messages"],
+                messages_in,
                 tools=runtime.registry.schemas(set(state["allowed_tools"])),
             )
-            messages = list(state["messages"])
+            messages = list(messages_in)
             tool_calls_formatted = []
             for call in turn.tool_calls:
                 tool_calls_formatted.append(
@@ -331,22 +403,35 @@ class AgentRuntime:
                     "prompt_tokens": turn.prompt_tokens,
                     "completion_tokens": turn.completion_tokens,
                     "cost_usd": turn.cost_usd,
+                    "content": (turn.content or "")[:2_000],
                 },
             )
             error: str | None = None
-            for call in turn.tool_calls:
+
+            async def _run_one(call: Any) -> tuple[Any, Any]:
                 result = await runtime.registry.execute(
                     call.name,
                     call.arguments,
                     context,
                     allowed=set(state["allowed_tools"]),
                 )
+                return call, result
+
+            if turn.tool_calls and all(call.name in READ_ONLY_TOOLS for call in turn.tool_calls):
+                executed = await asyncio.gather(*[_run_one(call) for call in turn.tool_calls])
+            else:
+                executed = [await _run_one(call) for call in turn.tool_calls]
+
+            for call, result in executed:
+                payload = result.model_dump_json()
+                if len(payload) > _MAX_TOOL_RESULT_CHARS:
+                    payload = payload[:_MAX_TOOL_RESULT_CHARS] + "...[truncated]"
                 messages.append(
                     {
                         "role": "tool",
                         "tool_call_id": call.id,
                         "name": call.name,
-                        "content": result.model_dump_json(),
+                        "content": payload,
                     }
                 )
                 event_state = cast(AgentState, {**state, "events": events})
@@ -401,12 +486,7 @@ class AgentRuntime:
                         {"reason": "no runnable test command or execute permission"},
                     ),
                 }
-            context = ToolContext(
-                workspace=Path(state["workspace"]),
-                permission=permission,
-                runner=runtime._runner(Path(state["workspace"]), config),
-                approved=state["approved"],
-            )
+            context = runtime._tool_context(Path(state["workspace"]), state, config)
             result = await runtime.registry.execute(
                 "run_tests",
                 {"command": command, "timeout": config.command_timeout},
@@ -456,11 +536,7 @@ class AgentRuntime:
             }
 
         async def finalize(state: AgentState) -> AgentState:
-            context = ToolContext(
-                workspace=Path(state["workspace"]),
-                permission=PermissionMode(state["permission"]),
-                runner=runtime._runner(Path(state["workspace"]), config),
-            )
+            context = runtime._tool_context(Path(state["workspace"]), state, config)
             diff_result = await runtime.registry.execute("git_diff", {}, context)
             diff = diff_result.data if diff_result.status is ToolStatus.SUCCESS else ""
             failed = state.get("test_exit_code") not in (None, 0)
@@ -716,14 +792,30 @@ class AgentRuntime:
             "test_command": runtime_config.test_command,
             "test_exit_code": None,
             "approved": runtime_config.approved,
+            "ops_approved": runtime_config.ops_approved,
+            "ops_capabilities": sorted(runtime_config.ops_capabilities),
+            "network_approved": runtime_config.network_approved,
+            "network_capabilities": sorted(runtime_config.network_capabilities),
             "require_plan_approval": runtime_config.require_plan_approval,
         }
         async with self._checkpointer() as checkpointer:
             graph = self._build_graph(runtime_config, checkpointer)
-            final = cast(
-                AgentState,
-                await graph.ainvoke(initial, config={"configurable": {"thread_id": identifier}}),
-            )
+            final: AgentState = {**initial}
+            # Track by sequence, not list length: _emit truncates events in state.
+            seen_sequence = 0
+            async for update in graph.astream(
+                initial,
+                config={"configurable": {"thread_id": identifier}},
+                stream_mode="values",
+            ):
+                final = cast(AgentState, update)
+                events = final.get("events", [])
+                if runtime_config.on_event:
+                    for event in events:
+                        sequence = int(event.get("sequence") or 0)
+                        if sequence > seen_sequence:
+                            await runtime_config.on_event(event)
+                            seen_sequence = sequence
         return _to_result(final)
 
     async def resume(self, run_id: str, *, approved: bool, config: RuntimeConfig) -> RunResult:

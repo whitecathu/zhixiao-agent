@@ -1,9 +1,22 @@
 <template>
   <div class="login-wrap">
-    <div class="intro"><span class="intro-mark">Z</span><p class="eyebrow">FULL-STACK ENGINEERING AGENT</p><h1>从工程目标<br/>到可信交付</h1><p>仓库探测、计划审批、隔离实现、测试复核与知识沉淀，在一个可回放的执行闭环中完成。</p><div class="intro-loop"><span>PLAN</span><i>→</i><span>BUILD</span><i>→</i><span>VERIFY</span><i>→</i><span>SHIP</span></div></div>
-    <el-card class="card">
+    <div class="intro">
+      <span class="intro-mark">Z</span>
+      <p class="eyebrow">FULL-STACK ENGINEERING AGENT</p>
+      <h1>从工程目标<br />到可信交付</h1>
+      <p>
+        仓库探测、计划审批、隔离实现、测试复核与知识沉淀，在一个可回放的执行闭环中完成。
+      </p>
+      <div class="intro-loop">
+        <span>PLAN</span><i>→</i><span>BUILD</span><i>→</i><span>VERIFY</span><i>→</i><span>SHIP</span>
+      </div>
+    </div>
+    <el-card class="card" shadow="never">
       <template #header>
-        <div class="title"><strong>智效工坊</strong><small>登录工程 Agent 控制台</small></div>
+        <div class="title">
+          <strong>智效工坊</strong>
+          <small>登录工程 Agent 控制台</small>
+        </div>
       </template>
       <el-tabs v-model="mode">
         <el-tab-pane label="登录" name="login">
@@ -98,7 +111,112 @@ async function submitRegister() {
 </script>
 
 <style scoped lang="scss">
-.login-wrap { display:grid; grid-template-columns:minmax(420px,1fr) 480px; align-items:center; gap:70px; min-height:100vh; padding:8vw; color:#edf7ee; background-color:#101a13; background-image:radial-gradient(#35473a 1px,transparent 1px); background-size:22px 22px; }
-.intro { max-width:680px; }.intro-mark { display:grid; place-items:center; width:48px;height:48px;margin-bottom:40px;color:#122016;background:#9eef6b;font:800 25px var(--mono);transform:rotate(-3deg);}.intro h1 { margin:8px 0 20px; font-size:58px; line-height:1.03; letter-spacing:-2px; }.intro>p:not(.eyebrow) { max-width:580px; color:#9cac9f; font-size:16px; line-height:1.8; }.intro-loop { display:flex; gap:13px; align-items:center; margin-top:38px; color:#a9ff83; font:700 11px var(--mono); letter-spacing:1px; }.intro-loop i { color:#53675a; font-style:normal; }.card { width:100%; padding:14px; color:var(--text); background:var(--surface); border:1px solid #53675a; box-shadow:18px 18px 0 rgba(66,88,72,.24); }.title strong,.title small { display:block; }.title strong { font-size:21px; }.title small { margin-top:4px; color:var(--text-muted); font-weight:400; }
-@media(max-width:900px){.login-wrap{grid-template-columns:1fr;padding:28px}.intro{display:none}.card{max-width:480px;margin:auto}}
+.login-wrap {
+  display: grid;
+  grid-template-columns: minmax(420px, 1fr) 440px;
+  align-items: center;
+  gap: clamp(40px, 6vw, 80px);
+  min-height: 100vh;
+  padding: clamp(32px, 7vw, 96px);
+  color: #edf7ee;
+  background-color: #0e1611;
+  background-image:
+    radial-gradient(ellipse 80% 50% at 20% 40%, rgba(40, 125, 60, 0.18), transparent 55%),
+    radial-gradient(#2a3a2f 1px, transparent 1px);
+  background-size: auto, 22px 22px;
+}
+
+.intro {
+  max-width: 640px;
+  animation: fade-up var(--duration-base) var(--ease-out);
+}
+
+.intro-mark {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  margin-bottom: var(--space-8);
+  color: #122016;
+  background: var(--brand-accent);
+  font: 800 24px var(--font-mono);
+  border-radius: var(--radius-sm);
+  transform: rotate(-3deg);
+}
+
+.intro h1 {
+  margin: 8px 0 20px;
+  font-size: clamp(36px, 5vw, 52px);
+  font-weight: 650;
+  line-height: 1.05;
+  letter-spacing: -1.6px;
+}
+
+.intro > p:not(.eyebrow) {
+  max-width: 540px;
+  color: #9cac9f;
+  font-size: var(--text-md);
+  line-height: var(--leading-relaxed);
+}
+
+.intro-loop {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  margin-top: var(--space-8);
+  color: var(--brand-accent);
+  font: 700 11px var(--font-mono);
+  letter-spacing: 1px;
+}
+
+.intro-loop i {
+  color: #53675a;
+  font-style: normal;
+}
+
+.card {
+  width: 100%;
+  padding: var(--space-2);
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid #3d5244;
+  box-shadow: 12px 12px 0 rgba(40, 60, 45, 0.28);
+  animation: fade-up calc(var(--duration-base) + 0.06s) var(--ease-out);
+}
+
+.title strong,
+.title small {
+  display: block;
+}
+
+.title strong {
+  font-size: var(--text-xl);
+  font-weight: 650;
+  letter-spacing: -0.3px;
+}
+
+.title small {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-weight: 400;
+  font-size: var(--text-sm);
+}
+
+@media (max-width: 900px) {
+  .login-wrap {
+    grid-template-columns: 1fr;
+    padding: var(--space-7) var(--space-5);
+  }
+
+  .intro {
+    display: none;
+  }
+
+  .card {
+    max-width: 440px;
+    margin: auto;
+    box-shadow: none;
+  }
+}
 </style>

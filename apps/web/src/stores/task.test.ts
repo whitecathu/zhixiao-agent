@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { invocationToTest, invocationsToTerminal, useTaskStore } from "./task";
+import { invocationToTest, invocationsToTerminal, isTestInvocation, useTaskStore } from "./task";
 import type { ToolInvocation } from "@/types";
 
 vi.mock("@/api/task", () => ({
@@ -40,13 +40,14 @@ describe("task store event projection", () => {
     expect(store.lastEventId).toBeNull();
   });
 
-  it("projects persisted test and terminal tool invocations", () => {
+  it("projects persisted run_tests and terminal tool invocations", () => {
     const invocation: ToolInvocation = {
-      id: 7, task_run_id: 1, run_step_id: 2, agent_name: "tester", tool_name: "test",
+      id: 7, task_run_id: 1, run_step_id: 2, agent_name: "tester", tool_name: "run_tests",
       input: { command: "pytest -q" }, status: "succeeded", duration_ms: 125,
       result: { status: "succeeded", summary: "31 passed", next_actions: [], artifacts: [] },
       created_at: "2026-01-01", updated_at: "2026-01-01",
     };
+    expect(isTestInvocation(invocation)).toBe(true);
     expect(invocationToTest(invocation)).toEqual({
       id: "7", command: "pytest -q", status: "passed", duration_ms: 125, summary: "31 passed",
     });

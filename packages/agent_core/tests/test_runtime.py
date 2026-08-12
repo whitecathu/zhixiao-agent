@@ -126,3 +126,53 @@ async def test_edit_run_uses_an_isolated_git_worktree(tmp_path: Path) -> None:
     worktree = next(item for item in result.artifacts if item.kind == "worktree")
     assert (Path(worktree.path) / "app.py").read_text(encoding="utf-8") == "value = 2\n"
     assert "value = 2" in result.diff
+
+
+@pytest.mark.asyncio
+async def test_on_event_keeps_firing_after_state_event_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Truncating state.events must not stall the live on_event fan-out."""
+    import zhixiao_agent.runtime as runtime_module
+
+    monkeypatch.setattr(runtime_module, "_MAX_EVENTS_IN_STATE", 3)
+    (tmp_path / "a.txt").write_text("a\n", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("b\n", encoding="utf-8")
+    (tmp_path / "c.txt").write_text("c\n", encoding="utf-8")
+    (tmp_path / "d.txt").write_text("d\n", encoding="utf-8")
+    model = ScriptedModel(
+        [
+            ModelTurn(content='{"plan":["Read files"]}'),
+            ModelTurn(
+                tool_calls=[
+                    ToolCall(id="1", name="read_file", arguments={"path": "a.txt"}),
+                    ToolCall(id="2", name="read_file", arguments={"path": "b.txt"}),
+                    ToolCall(id="3", name="read_file", arguments={"path": "c.txt"}),
+                    ToolCall(id="4", name="read_file", arguments={"path": "d.txt"}),
+                ]
+            ),
+            ModelTurn(content="Read four files.", model="scripted"),
+        ]
+    )
+    seen: list[int] = []
+
+    async def on_event(event: dict) -> None:
+        seen.append(int(event["sequence"]))
+
+    result = await AgentRuntime(model).run(
+        "review the project",
+        tmp_path,
+        RuntimeConfig(
+            permission=PermissionMode.READ_ONLY,
+            require_plan_approval=False,
+            on_event=on_event,
+        ),
+    )
+
+    assert result.status is RunStatus.SUCCEEDED
+    assert seen == sorted(seen)
+    assert max(seen) >= 4
+    assert len(seen) == len(set(seen))
+    # Cap keeps only the latest window in durable state, but live sink saw more.
+    assert len(result.events) <= 3
+    assert len(seen) > len(result.events)

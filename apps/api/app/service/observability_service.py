@@ -55,6 +55,21 @@ class ObservabilityService:
         }[window]
         generated_at = datetime.now(UTC)
         since = generated_at - window_delta
+        from sqlalchemy import func
+
+        status_rows = (
+            await self.session.execute(
+                select(TaskRun.status, func.count())
+                .where(
+                    TaskRun.space_id == space_id,
+                    TaskRun.created_at >= since,
+                    TaskRun.deleted_at.is_(None),
+                )
+                .group_by(TaskRun.status)
+            )
+        ).all()
+        status_counts = {status: int(count) for status, count in status_rows}
+        # Durations still need started/finished pairs; load terminal runs only.
         runs = list(
             (
                 await self.session.scalars(
@@ -62,6 +77,16 @@ class ObservabilityService:
                         TaskRun.space_id == space_id,
                         TaskRun.created_at >= since,
                         TaskRun.deleted_at.is_(None),
+                        TaskRun.status.in_(
+                            (
+                                "succeeded",
+                                "failed",
+                                "running",
+                                "awaiting_approval",
+                                "interrupted",
+                                "queued",
+                            )
+                        ),
                     )
                 )
             ).all()
@@ -69,8 +94,9 @@ class ObservabilityService:
         run_ids = [run.id for run in runs]
 
         terminal = [run for run in runs if run.status in {"succeeded", "failed"}]
-        succeeded = sum(run.status == "succeeded" for run in terminal)
-        failed = sum(run.status == "failed" for run in terminal)
+        succeeded = status_counts.get("succeeded", 0)
+        failed = status_counts.get("failed", 0)
+        terminal_count = succeeded + failed
         durations = [
             duration
             for run in terminal
@@ -83,16 +109,17 @@ class ObservabilityService:
             for item in verified
         )
         tasks = TaskRunSummary(
-            total=len(runs),
+            total=sum(status_counts.values()),
             active=sum(
-                run.status in {"running", "awaiting_approval", "interrupted"} for run in runs
+                status_counts.get(status, 0)
+                for status in ("running", "awaiting_approval", "interrupted")
             ),
-            queued=sum(run.status == "queued" for run in runs),
+            queued=status_counts.get("queued", 0),
             succeeded=succeeded,
             failed=failed,
-            running=sum(run.status == "running" for run in runs),
-            awaiting_approval=sum(run.status == "awaiting_approval" for run in runs),
-            success_rate=round(succeeded / len(terminal), 4) if terminal else 0.0,
+            running=status_counts.get("running", 0),
+            awaiting_approval=status_counts.get("awaiting_approval", 0),
+            success_rate=round(succeeded / terminal_count, 4) if terminal_count else 0.0,
             first_pass_rate=round(first_passed / len(verified), 4) if verified else 0.0,
             p95_duration_seconds=round(_percentile(durations, 0.95), 3),
         )

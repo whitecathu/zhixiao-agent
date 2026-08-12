@@ -64,9 +64,15 @@ python -m app.main    # 默认 0.0.0.0:8000
 # 或 uvicorn app.main:app --reload
 ```
 
-OpenAPI 文档：`http://localhost:8000/docs`；按模块分组（认证/团队空间/任务/SSE 执行流/知识/统计与回溯）。
+OpenAPI 文档：`http://localhost:8000/docs`；按模块分组（认证/团队空间/Agent 平台/旧版任务与 SSE/知识/统计与回溯）。
 
 ## 三、接口清单
+
+### 任务控制面迁移
+
+`/api/v1/tasks` 的旧版 CRUD/控制接口和 `/sse/tasks/{id}` 已弃用，仅为兼容已有调用方保留，数据库模型不变。响应包含 `Deprecation: true`、`Warning` 和指向替代接口的 `Link`，OpenAPI 操作也标记为 deprecated。
+
+新 Web 和新集成应使用 `/api/v1/task-runs` 创建/查询运行，并通过 `/api/v1/tasks/{id}/events` 订阅可回放事件。旧接口尚未设置强制下线日期。
 
 | 方法 | 路径 | 说明 | 鉴权 |
 |------|------|------|------|
@@ -82,12 +88,12 @@ OpenAPI 文档：`http://localhost:8000/docs`；按模块分组（认证/团队�
 | POST | /api/v1/spaces/{id}/members | 邀请成员 | space_admin+ |
 | GET  | /api/v1/spaces/{id}/members | 成员列表 | ✅ |
 | DELETE | /api/v1/spaces/{id}/members/{uid} | 移除成员 | space_admin+ |
-| POST | /api/v1/tasks | 创建任务（异步由引擎执行） | ✅ + X-Space-Id |
-| GET  | /api/v1/tasks | 任务分页 | ✅ + X-Space-Id |
-| GET  | /api/v1/tasks/{id} | 任务详情 | ✅ + X-Space-Id |
-| POST | /api/v1/tasks/{id}/control | interrupt/resume | ✅ |
-| GET  | /api/v1/tasks/{id}/log | 步骤回溯 | ✅ |
-| GET  | /sse/tasks/{id} | SSE 流式执行 | ✅ |
+| POST | /api/v1/tasks | 旧版：创建任务（deprecated） | ✅ + X-Space-Id |
+| GET  | /api/v1/tasks | 旧版：任务分页（deprecated） | ✅ + X-Space-Id |
+| GET  | /api/v1/tasks/{id} | 旧版：任务详情（deprecated） | ✅ + X-Space-Id |
+| POST | /api/v1/tasks/{id}/control | 旧版：interrupt/resume（deprecated） | ✅ |
+| GET  | /api/v1/tasks/{id}/log | 旧版：步骤回溯（deprecated） | ✅ |
+| GET  | /sse/tasks/{id} | 旧版 SSE（deprecated） | ✅ + X-Space-Id |
 | GET  | /api/v1/knowledge | 知识分页 | ✅ + X-Space-Id |
 | GET  | /api/v1/knowledge/{id} | 知识详情 | ✅ |
 | PUT  | /api/v1/knowledge/{id} | 修改 | ✅ |

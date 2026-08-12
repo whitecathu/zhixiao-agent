@@ -4,7 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from ..security import PermissionDenied
+from ..security import PermissionDenied, required_command_capability
 from ..types import Artifact, ToolResult
 from .base import BaseTool, ToolContext
 
@@ -22,11 +22,12 @@ class TerminalTool(BaseTool):
     async def execute(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
         try:
             request = self.validate(arguments)
+            capability = required_command_capability(request.command)
             result = await context.runner.run(
                 request.command,
                 permission=context.permission,
                 timeout=request.timeout,
-                approved=context.approved,
+                approved=capability is None or context.allows(capability),
             )
             data = result.model_dump()
             if result.exit_code == 0:

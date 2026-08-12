@@ -11,8 +11,14 @@ export function invocationToTest(item: ToolInvocation): TestResult {
   return { id: String(item.id), command, status, duration_ms: item.duration_ms, summary: item.result.summary };
 }
 
+const TERMINAL_TOOLS = new Set(["terminal", "run_tests", "test"]);
+
+export function isTestInvocation(item: ToolInvocation): boolean {
+  return item.tool_name === "run_tests" || item.tool_name === "test";
+}
+
 export function invocationsToTerminal(items: ToolInvocation[]): string[] {
-  return items.filter((item) => item.tool_name === "terminal" || item.tool_name === "test")
+  return items.filter((item) => TERMINAL_TOOLS.has(item.tool_name))
     .flatMap((item) => {
       const command = typeof item.input?.command === "string" ? `$ ${item.input.command}` : `$ ${item.tool_name}`;
       return [command, item.result.summary, item.result.error_root_cause].filter((line): line is string => Boolean(line));
@@ -90,7 +96,7 @@ export const useTaskStore = defineStore("task", () => {
     if (results[0].status === "fulfilled") approvals.value = results[0].value;
     if (results[1].status === "fulfilled") artifacts.value = results[1].value;
     if (results[2].status === "fulfilled") {
-      tests.value = results[2].value.filter((item) => item.tool_name === "test").map(invocationToTest);
+      tests.value = results[2].value.filter(isTestInvocation).map(invocationToTest);
       terminalLines.value = invocationsToTerminal(results[2].value);
     }
     if (results[3].status === "fulfilled") diff.value = results[3].value.unified_diff;
@@ -102,6 +108,16 @@ export const useTaskStore = defineStore("task", () => {
     approvals.value = approvals.value.map((item) => item.id === updated.id ? updated : item);
   }
 
+  async function requestApproval(
+    taskId: number,
+    operation: "destructive_command" | "git_publish" | "mcp" | "sub_agent" | "network_tools",
+  ) {
+    const { runApi } = await import("@/api/agent");
+    const created = await runApi.requestApproval(taskId, operation);
+    approvals.value.push(created);
+    return created;
+  }
+
   async function getReplay(taskId: number) {
     return await (await import("@/api/stats")).statsApi.replay(taskId);
   }
@@ -109,6 +125,7 @@ export const useTaskStore = defineStore("task", () => {
   return {
     currentTask, timeline, streamedChunks, sseEvents, approvals, artifacts, tests, diff,
     terminalLines, lastEventId,
-    reset, load, create, interrupt, resume, handleSSE, loadRunDetails, decideApproval, getReplay,
+    reset, load, create, interrupt, resume, handleSSE, loadRunDetails, decideApproval,
+    requestApproval, getReplay,
   };
 });

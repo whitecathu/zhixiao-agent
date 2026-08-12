@@ -32,6 +32,7 @@ from app.schema.platform import (
     AgentUpdate,
     ApprovalDecision,
     ApprovalOut,
+    ApprovalRequest,
     ArtifactCreate,
     ArtifactOut,
     DiffOut,
@@ -260,6 +261,18 @@ async def list_run_approvals(
 ):
     items = await svc.list_approvals(run_id, space_id)
     return success([approval_data(item) for item in items])
+
+
+@router.post("/task-runs/{run_id}/approvals")
+async def request_run_approval(
+    run_id: int,
+    payload: ApprovalRequest,
+    user=Depends(get_current_user),
+    space_id: int = Depends(get_space_id),
+    svc: PlatformService = Depends(service),
+):
+    item = await svc.request_approval(run_id, space_id, user["user_id"], payload)
+    return success(approval_data(item))
 
 
 @router.post("/approvals/{approval_id}/decision")
@@ -532,6 +545,10 @@ async def create_agent(
     space_id: int = Depends(get_space_id),
     svc: PlatformService = Depends(service),
 ):
+    privileged_roles = {"metagpt", "team", "metagpt_team"}
+    privileged_tools = {"terminal", "background_command", "mcp", "sub_agent", "open_pull_request"}
+    if payload.role in privileged_roles or set(payload.tool_allowlist) & privileged_tools:
+        await svc.require_space_admin(space_id, user["user_id"])
     item = await svc.create_scoped(AgentDefinition, space_id, payload)
     return success(AgentOut.model_validate(item).model_dump())
 
@@ -554,7 +571,7 @@ async def update_agent(
     space_id: int = Depends(get_space_id),
     svc: PlatformService = Depends(service),
 ):
-    item = await svc.update_agent(agent_id, space_id, payload)
+    item = await svc.update_agent(agent_id, space_id, user["user_id"], payload)
     return success(AgentOut.model_validate(item).model_dump())
 
 

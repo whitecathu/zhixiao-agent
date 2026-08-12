@@ -6,6 +6,7 @@ import pytest
 
 from app.core.events import EventBroker
 from app.core.jobs import MemoryJobStore, RunQueue
+from app.core.config import settings
 
 
 @pytest.fixture
@@ -25,10 +26,12 @@ async def auth_headers(client):
             "password": "Str0ngPwd!",
         },
     )
-    return {
-        "Authorization": f"Bearer {login.json()['data']['access_token']}",
-        "X-Space-Id": "1",
-    }
+    token = login.json()["data"]["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    space = await client.post(
+        "/api/v1/spaces", headers=headers, json={"name": "Closure Space"}
+    )
+    return {**headers, "X-Space-Id": str(space.json()["data"]["id"])}
 
 
 @pytest.mark.asyncio
@@ -55,7 +58,7 @@ async def test_approval_enqueues_and_worker_callback_persists_outputs(client, au
                 "repository_id": repository["id"],
                 "title": "Complete worker closure",
                 "prompt": "Implement the change, run focused tests, and return a diff.",
-                "permission_mode": "execute",
+                "permission_mode": "full",
             },
         )
     ).json()["data"]
@@ -126,14 +129,14 @@ async def test_approval_enqueues_and_worker_callback_persists_outputs(client, au
     }
     callback = await client.post(
         f"/api/v1/internal/task-runs/{run['id']}/result",
-        headers={"X-Worker-Token": "test-worker-token"},
+        headers={"X-Worker-Token": settings.WORKER_CALLBACK_TOKEN},
         json=payload,
     )
     assert callback.status_code == 200
     assert callback.json()["data"]["status"] == "succeeded"
     replayed_callback = await client.post(
         f"/api/v1/internal/task-runs/{run['id']}/result",
-        headers={"X-Worker-Token": "test-worker-token"},
+        headers={"X-Worker-Token": settings.WORKER_CALLBACK_TOKEN},
         json=payload,
     )
     assert replayed_callback.status_code == 200
@@ -188,6 +191,88 @@ async def test_approval_enqueues_and_worker_callback_persists_outputs(client, au
         item.event == "result.persisted"
         for item in await EventBroker.default().read(str(run["id"]), after="0-0", block_ms=0)
     )
+    requested = await client.post(
+        f"/api/v1/task-runs/{run['id']}/approvals",
+        headers=auth_headers,
+        json={"operation": "git_publish"},
+    )
+    assert requested.status_code == 200
+    publish_approval = requested.json()["data"]
+    await client.post(
+        f"/api/v1/approvals/{publish_approval['id']}/decision",
+        headers=auth_headers,
+        json={"decision": "approved"},
+    )
+    publish_job = queue_store.jobs[-1]
+    assert publish_job.ops_capabilities == '["git_publish"]'
+    assert publish_job.network_capabilities == '["git_publish"]'
+    assert publish_job.clone_approved == "false"
+
+
+@pytest.mark.asyncio
+async def test_rejecting_git_publish_keeps_succeeded_run(client, auth_headers):
+    repository = (
+        await client.post(
+            "/api/v1/repositories",
+            headers=auth_headers,
+            json={"name": "publish-reject", "root_path": "C:/work/publish-reject"},
+        )
+    ).json()["data"]
+    run = (
+        await client.post(
+            "/api/v1/task-runs",
+            headers=auth_headers,
+            json={
+                "repository_id": repository["id"],
+                "title": "Reject publish",
+                "prompt": "Implement a small change and leave a verified diff.",
+                "permission_mode": "full",
+            },
+        )
+    ).json()["data"]
+    start = (
+        await client.get(f"/api/v1/task-runs/{run['id']}/approvals", headers=auth_headers)
+    ).json()["data"][0]
+    await client.post(
+        f"/api/v1/approvals/{start['id']}/decision",
+        headers=auth_headers,
+        json={"decision": "approved"},
+    )
+    from app.core.config import settings
+
+    callback = await client.post(
+        f"/api/v1/internal/task-runs/{run['id']}/result",
+        headers={"X-Worker-Token": settings.WORKER_CALLBACK_TOKEN},
+        json={
+            "run_id": str(run["id"]),
+            "status": "succeeded",
+            "summary": "done",
+            "task_type": "bugfix",
+            "plan": ["edit"],
+            "artifacts": [],
+            "test_command": None,
+            "test_exit_code": 0,
+            "diff": "diff --git a/a.py b/a.py\n+ok\n",
+            "events": [],
+        },
+    )
+    assert callback.json()["data"]["status"] == "succeeded"
+    requested = await client.post(
+        f"/api/v1/task-runs/{run['id']}/approvals",
+        headers=auth_headers,
+        json={"operation": "git_publish"},
+    )
+    assert requested.status_code == 200
+    rejected = await client.post(
+        f"/api/v1/approvals/{requested.json()['data']['id']}/decision",
+        headers=auth_headers,
+        json={"decision": "rejected", "comment": "not now"},
+    )
+    assert rejected.json()["data"]["status"] == "rejected"
+    current = (
+        await client.get(f"/api/v1/task-runs/{run['id']}", headers=auth_headers)
+    ).json()["data"]
+    assert current["status"] == "succeeded"
 
 
 @pytest.mark.asyncio
@@ -238,4 +323,83 @@ async def test_remote_repository_requires_network_clone_approval(client, auth_he
     )
     queue_store = RunQueue.default().store
     assert isinstance(queue_store, MemoryJobStore)
-    assert queue_store.jobs[-1].network_approved == "true"
+    job = queue_store.jobs[-1]
+    assert job.clone_approved == "true"
+    assert job.network_approved == "false"
+    assert job.network_capabilities == "[]"
+    assert job.approved == "true"
+    assert job.ops_approved == "false"
+
+
+@pytest.mark.asyncio
+async def test_local_run_approval_does_not_grant_ops(client, auth_headers):
+    repository = (
+        await client.post(
+            "/api/v1/repositories",
+            headers=auth_headers,
+            json={"name": "local-repo", "root_path": "C:/work/local-repo"},
+        )
+    ).json()["data"]
+    run = (
+        await client.post(
+            "/api/v1/task-runs",
+            headers=auth_headers,
+            json={
+                "repository_id": repository["id"],
+                "title": "Local edit",
+                "prompt": "Fix a small bug.",
+                "permission_mode": "edit",
+            },
+        )
+    ).json()["data"]
+    approval = (
+        await client.get(f"/api/v1/task-runs/{run['id']}/approvals", headers=auth_headers)
+    ).json()["data"][0]
+    await client.post(
+        f"/api/v1/approvals/{approval['id']}/decision",
+        headers=auth_headers,
+        json={"decision": "approved"},
+    )
+    job = RunQueue.default().store.jobs[-1]
+    assert job.approved == "true"
+    assert job.ops_approved == "false"
+    assert job.network_approved == "false"
+
+
+@pytest.mark.asyncio
+async def test_interrupt_sets_worker_control_flag(client, auth_headers):
+    from app.core.redis_client import RedisClient
+
+    repository = (
+        await client.post(
+            "/api/v1/repositories",
+            headers=auth_headers,
+            json={"name": "interrupt-repo", "root_path": "C:/work/interrupt"},
+        )
+    ).json()["data"]
+    run = (
+        await client.post(
+            "/api/v1/task-runs",
+            headers=auth_headers,
+            json={
+                "repository_id": repository["id"],
+                "title": "Interrupt me",
+                "prompt": "Long running task",
+                "permission_mode": "read_only",
+            },
+        )
+    ).json()["data"]
+    approval = (
+        await client.get(f"/api/v1/task-runs/{run['id']}/approvals", headers=auth_headers)
+    ).json()["data"][0]
+    await client.post(
+        f"/api/v1/approvals/{approval['id']}/decision",
+        headers=auth_headers,
+        json={"decision": "approved"},
+    )
+    interrupted = await client.post(
+        f"/api/v1/task-runs/{run['id']}/interrupt", headers=auth_headers
+    )
+    assert interrupted.json()["data"]["status"] == "interrupted"
+    redis = await RedisClient.get()
+    assert await redis.get(f"run:control:{run['id']}") == "stop"

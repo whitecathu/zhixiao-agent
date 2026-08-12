@@ -21,12 +21,26 @@ class ToolContext(BaseModel):
     workspace: Path
     permission: PermissionMode
     runner: Runner
+    # Plan/run-start gate: allows edit/execute after human start approval.
     approved: bool = False
+    # Separate high-risk ops (destructive commands, publish, MCP, sub-agent).
+    ops_approved: bool = False
+    # Operation-scoped approvals. The legacy boolean never grants a capability by itself.
+    ops_capabilities: frozenset[str] = Field(default_factory=frozenset)
+    # Separate network approval for web_search / web_fetch / remote clone.
+    network_approved: bool = False
+    network_capabilities: frozenset[str] = Field(default_factory=frozenset)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @property
     def boundary(self) -> WorkspaceBoundary:
         return WorkspaceBoundary(self.workspace)
+
+    def allows(self, capability: str) -> bool:
+        return capability in self.ops_capabilities
+
+    def allows_network(self, capability: str) -> bool:
+        return capability in self.network_capabilities
 
 
 class BaseTool(ABC):

@@ -4,7 +4,7 @@
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, Query, Request
+from fastapi import APIRouter, Depends, Header, Query, Request, Response
 
 from app.core.middleware import get_current_user, get_space_id
 from app.core.response import ApiResponse, PageResponse
@@ -14,7 +14,20 @@ from app.service.task_service import TaskService
 from app.engine.abstract_engine import AbstractExecutionEngine
 from app.engine.registry import get_execution_engine
 
-router = APIRouter(prefix="/api/v1/tasks", tags=["任务"])
+def add_legacy_task_deprecation_headers(response: Response) -> None:
+    response.headers["Deprecation"] = "true"
+    response.headers["Warning"] = (
+        '299 - "Deprecated API: migrate to /api/v1/task-runs"'
+    )
+    response.headers["Link"] = '</api/v1/task-runs>; rel="successor-version"'
+
+
+router = APIRouter(
+    prefix="/api/v1/tasks",
+    tags=["任务（旧版）"],
+    dependencies=[Depends(add_legacy_task_deprecation_headers)],
+    deprecated=True,
+)
 
 
 def get_task_service(

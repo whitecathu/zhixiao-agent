@@ -183,7 +183,21 @@ onMounted(load);
 .palette { margin: 18px -4px 0; padding: 16px 4px 0; border-top: 1px solid var(--border); }
 .palette > strong, .palette > small { display: block; }
 .palette > small { margin: 3px 0 10px; color: var(--text-muted); }
-.palette button { width: 100%; display: flex; align-items: center; gap: 8px; margin: 5px 0; padding: 8px; color: var(--text); background: var(--surface-soft); border: 1px solid var(--border); cursor: grab; text-align: left; }
+.palette button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 5px 0;
+  padding: 8px;
+  color: var(--text);
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  cursor: grab;
+  text-align: left;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.palette button:hover { border-color: #9cb7a1; background: var(--brand-soft); }
 .palette button span { width: 24px; height: 24px; display: grid; place-items: center; color: var(--brand); background: var(--brand-soft); font: 700 11px var(--mono); }
 .editor-stack { min-width: 0; display: flex; flex-direction: column; gap: 14px; }
 .workflow-name { max-width: 360px; }

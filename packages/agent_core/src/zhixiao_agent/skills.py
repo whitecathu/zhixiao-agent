@@ -4,6 +4,8 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+_PACKAGE_SKILLS = Path(__file__).resolve().parents[2] / "skills"
+
 
 @dataclass(frozen=True)
 class Skill:
@@ -80,3 +82,57 @@ class SkillManager:
             ),
             reverse=True,
         )
+
+    def match_score(self, skill: Skill, query: str) -> int:
+        terms = set(query.lower().split())
+        haystack = set(f"{skill.name} {skill.description} {' '.join(skill.tags)}".lower().split())
+        return len(terms & haystack)
+
+
+def default_skill_roots(
+    workspace: Path | None = None,
+    *,
+    extra: tuple[Path, ...] | None = None,
+    trusted_workspace: bool = False,
+) -> list[Path]:
+    """Package and explicit roots, plus workspace skills only when trusted."""
+    roots: list[Path] = []
+    if extra:
+        roots.extend(Path(path) for path in extra)
+    roots.append(_PACKAGE_SKILLS)
+    if workspace is not None and trusted_workspace:
+        roots.append(Path(workspace) / ".zhixiao" / "skills")
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for root in roots:
+        resolved = root.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(resolved)
+    return unique
+
+
+def render_skill_context(prompt: str, manager: SkillManager, *, limit: int = 3) -> str:
+    """Select top matching skills and render instruction snippets for prompts."""
+    if not manager._skills:
+        manager.load()
+    selected: list[Skill] = []
+    for skill in manager.search(prompt):
+        if manager.match_score(skill, prompt) <= 0:
+            continue
+        selected.append(skill)
+        if len(selected) >= limit:
+            break
+    if not selected:
+        # Fallback: surface a small default set so package skills still guide planning.
+        selected = list(manager._skills.values())[:limit]
+    if not selected:
+        return ""
+    blocks: list[str] = []
+    for skill in selected:
+        body = skill.instructions.strip()
+        if len(body) > 2_500:
+            body = body[:2_500] + "\n...[truncated]"
+        blocks.append(f"### Skill: {skill.name}\n{skill.description}\n\n{body}".strip())
+    return "Relevant skills:\n\n" + "\n\n".join(blocks)
