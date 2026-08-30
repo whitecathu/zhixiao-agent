@@ -8,11 +8,15 @@
 python tests/evals/run_scenarios.py --validate-only --output evaluation-manifest.json
 ```
 
-该命令只校验清单，报告 `status=manifest_validated` 且 `metrics=null`。它不能证明 Agent 完成了场景。
+该命令只校验清单，报告 `status=manifest_validated` 且 `metrics=null`。它不能证明 Agent 完成了场景。生成的 `evaluation-manifest.json` 不要提交。
 
-## 离线门禁（Fixture）
+## 离线质量门禁（行为）
 
-CI 运行 `run_offline_gates.py`，使用仓库内固定 fixture 检查报告管线与安全策略。其结果必须标记为：
+真正跑 Agent 的离线门禁是 `python tests/evals/run_behavioral.py`（ScriptedModel + `AgentRuntime`）：危险命令拦截、协同 interrupt/resume、ask 只读。这是质量门禁，不是完成率。
+
+## 离线门禁（Fixture，provenance）
+
+CI 仍运行 `run_offline_gates.py`：先跑行为门禁，再用仓库内固定 fixture 检查报告管线与安全策略。fixture 结果必须标记为：
 
 ```json
 {

@@ -2,6 +2,8 @@
 
 智效工坊把控制面与执行面分开。Web/CLI 负责输入和审批，API 负责持久化与审计，Worker 调用 Agent Core，工具只在声明的 workspace 中运行。
 
+默认执行面是**单个编码 Agent 的工具循环**（LangGraph `StateGraph` + SQLite checkpointer）。图中的 MetaGPT 仅在 `engine=metagpt` 时启用。Redis Streams 是队列与 SSE 传输层，**不是**图 checkpointer。向量库与图谱是可选索引，不表示百万级召回已上线。
+
 ```mermaid
 flowchart LR
   U["Web / CLI / CI"] --> A["FastAPI control plane"]
@@ -63,6 +65,7 @@ MySQL 是业务记录的事实源；Redis Stream 是运行事件传输层；制�
 
 - WorkflowDefinition 是版本化 JSON DSL，草稿经管理员发布后才能执行；TaskRun 固化版本，Worker 按 DSL 动态构建 LangGraph 节点、条件、重试、审批与工具白名单。
 - AgentDefinition 保存角色、Prompt 与工具白名单。
+- PluginHost 以「万物皆插件」组合运行时：tools、commands、hooks、skills、MCP、prompt 都是同一套贡献点。内置插件提供默认实现；可信工作区的 `.zhixiao/commands`、`hooks.toml`、`skills` 和 `.zhixiao/plugins/*.py` 是同一 seam 的 Provider。消费方（Runtime / slash / TUI）只读取组装后的 Host，不导入具体 Provider。错误配置会失败退出，不会跳过。
 - ToolRegistry 统一类型化输入和 ToolResult 输出。
 - ModelProfile 采用 OpenAI-compatible 协议，路由层负责超时、回退、成本与 A/B 选择。
 - VectorStore 和 GraphStore 是异步抽象，支持内存测试适配器与外部后端。

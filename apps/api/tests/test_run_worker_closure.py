@@ -252,6 +252,11 @@ async def test_rejecting_git_publish_keeps_succeeded_run(client, auth_headers):
             "artifacts": [],
             "test_command": None,
             "test_exit_code": 0,
+            "verification": {
+                "outcome": "passed",
+                "reason": "fixture verification passed",
+                "waived": False,
+            },
             "diff": "diff --git a/a.py b/a.py\n+ok\n",
             "events": [],
         },

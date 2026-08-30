@@ -26,8 +26,12 @@ logs/
 *.log
 uploads/
 artifacts/
-.zhixiao/
 worktrees/
+/evaluation-manifest.json
+/evaluation-report.json
+/offline-fixture-report.json
+/cli-smoke.json
+coverage.xml
 models/
 adapters/
 datasets/generated/

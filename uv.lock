@@ -3286,15 +3286,18 @@ dependencies = [
     { name = "redis", extra = ["hiredis"] },
     { name = "sqlalchemy" },
     { name = "uvicorn", extra = ["standard"] },
+    { name = "zhixiao-agent" },
 ]
 
 [package.optional-dependencies]
 test = [
     { name = "aiosqlite" },
     { name = "httpx" },
+    { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
+    { name = "ruff" },
 ]
 
 [package.metadata]
@@ -3308,6 +3311,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.116,<1" },
     { name = "httpx", marker = "extra == 'test'", specifier = ">=0.28,<1" },
     { name = "loguru", specifier = ">=0.7,<0.8" },
+    { name = "mypy", marker = "extra == 'test'", specifier = ">=1.11,<2" },
     { name = "orjson", specifier = ">=3.9,<4" },
     { name = "prometheus-client", specifier = ">=0.21,<1" },
     { name = "pydantic", specifier = ">=2.11,<3" },
@@ -3317,8 +3321,10 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.23,<0.24" },
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=5,<6" },
     { name = "redis", extras = ["hiredis"], specifier = ">=5.0,<5.1" },
+    { name = "ruff", marker = "extra == 'test'", specifier = ">=0.6,<1" },
     { name = "sqlalchemy", specifier = ">=2.0,<2.1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.27,<0.28" },
+    { name = "zhixiao-agent", editable = "packages/agent_core" },
 ]
 provides-extras = ["test"]
 

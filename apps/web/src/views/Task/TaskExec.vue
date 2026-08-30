@@ -1,60 +1,72 @@
 <template>
   <section v-loading="loading" class="run-page page-shell">
     <header class="run-header">
-      <div>
-        <button
-          class="back-link"
-          aria-label="返回工程任务列表"
-          @click="$router.push('/tasks')"
-        >
-          ← 工程任务
-        </button>
-        <div class="title-line">
-          <h1>{{ taskState.currentTask?.title || `任务 #${taskId}` }}</h1>
-          <el-tag :type="statusTag(taskState.currentTask?.status)">
-            {{ statusText(taskState.currentTask?.status) }}
-          </el-tag>
-          <span
-            class="live-dot"
-            :class="{ online: connected }"
-            role="status"
-            aria-live="polite"
-            aria-atomic="true"
+      <div class="run-header-main">
+        <div>
+          <button
+            class="back-link"
+            aria-label="返回工程任务列表"
+            @click="$router.push('/tasks')"
           >
-            {{ connected ? "实时连接" : "已断开" }}
-          </span>
+            ← 工程任务
+          </button>
+          <div class="title-line">
+            <h1>{{ taskState.currentTask?.title || `任务 #${taskId}` }}</h1>
+            <el-tag :type="statusTag(taskState.currentTask?.status)">
+              {{ statusText(taskState.currentTask?.status) }}
+            </el-tag>
+            <span
+              class="live-dot"
+              :class="{ online: connected }"
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+            >
+              {{ connected ? "实时连接" : "已断开" }}
+            </span>
+          </div>
+          <p>{{ taskState.currentTask?.prompt }}</p>
         </div>
-        <p>{{ taskState.currentTask?.prompt }}</p>
+        <div class="ops" role="toolbar" aria-label="任务运行操作">
+          <el-button
+            v-if="isRunning"
+            type="warning"
+            aria-label="中断任务运行"
+            @click="onInterrupt"
+          >
+            中断
+          </el-button>
+          <el-button
+            v-if="isInterrupted"
+            type="primary"
+            aria-label="恢复任务运行"
+            @click="onResume"
+          >
+            恢复
+          </el-button>
+          <el-button aria-label="复制任务 Diff" @click="copyDiff">复制 Diff</el-button>
+          <el-button
+            type="success"
+            plain
+            :disabled="!canRequestPr"
+            aria-label="请求创建拉取请求"
+            @click="onRequestPr"
+          >
+            开 PR
+          </el-button>
+          <el-button aria-label="刷新任务运行详情" @click="refresh">刷新</el-button>
+        </div>
       </div>
-      <div class="ops" role="toolbar" aria-label="任务运行操作">
-        <el-button
-          v-if="isRunning"
-          type="warning"
-          aria-label="中断任务运行"
-          @click="onInterrupt"
-        >
-          中断
-        </el-button>
-        <el-button
-          v-if="isInterrupted"
-          type="primary"
-          aria-label="恢复任务运行"
-          @click="onResume"
-        >
-          恢复
-        </el-button>
-        <el-button aria-label="复制任务 Diff" @click="copyDiff">复制 Diff</el-button>
-        <el-button
-          type="success"
-          plain
-          :disabled="!canRequestPr"
-          aria-label="请求创建拉取请求"
-          @click="onRequestPr"
-        >
-          开 PR
-        </el-button>
-        <el-button aria-label="刷新任务运行详情" @click="refresh">刷新</el-button>
-      </div>
+
+      <section class="run-evidence" aria-labelledby="run-evidence-title">
+        <h2 id="run-evidence-title">{{ runEvidence.title }}</h2>
+        <dl>
+          <div v-for="item in runEvidence.items" :key="item.key">
+            <dt>{{ item.label }}</dt>
+            <dd :class="{ missing: item.missing }">{{ item.value }}</dd>
+          </div>
+        </dl>
+      </section>
     </header>
 
     <ExecutionGraph :events="taskState.sseEvents" />
@@ -160,6 +172,7 @@ import MarkdownView from "@/components/common/MarkdownView.vue";
 import { useTaskStore } from "@/stores/task";
 import { subscribeTask, type SSEStream } from "@/composables/useSSE";
 import { taskStatusTag, taskStatusText } from "@/utils/status";
+import { formatRunEvidence } from "@/utils/runEvidence";
 import type { Approval, Artifact } from "@/types";
 
 const route = useRoute();
@@ -183,6 +196,7 @@ const isRunning = computed(() =>
   ["awaiting_approval", "queued", "running"].includes(taskState.currentTask?.status || ""),
 );
 const isInterrupted = computed(() => taskState.currentTask?.status === "interrupted");
+const runEvidence = computed(() => formatRunEvidence(taskState.currentTask));
 const diffStats = computed(() => {
   const lines = taskState.diff.split("\n");
   return `${lines.filter((line) => line.startsWith("+") && !line.startsWith("+++")).length} additions · ${lines.filter((line) => line.startsWith("-") && !line.startsWith("---")).length} deletions`;
@@ -291,9 +305,52 @@ onUnmounted(() => sse?.cancel());
 
 .run-header {
   display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.run-header-main {
+  display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-6);
+}
+
+.run-evidence {
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+}
+
+.run-evidence h2 {
+  margin: 0 0 var(--space-2);
+  color: var(--text-muted);
+  font: 650 var(--text-xs) var(--font-sans);
+  letter-spacing: 0.08em;
+}
+
+.run-evidence dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.run-evidence dt {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.run-evidence dd {
+  margin: 4px 0 0;
+  color: var(--text);
+  font: 13px / 1.4 var(--font-mono);
+  word-break: break-word;
+}
+
+.run-evidence dd.missing {
+  color: var(--text-subtle);
 }
 
 .run-header h1 {
@@ -497,12 +554,16 @@ onUnmounted(() => sse?.cancel());
 }
 
 @media (max-width: 1000px) {
-  .run-header {
+  .run-header-main {
     display: block;
   }
 
   .ops {
     margin-top: var(--space-4);
+  }
+
+  .run-evidence dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .run-grid {

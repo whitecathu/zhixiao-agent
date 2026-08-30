@@ -360,7 +360,10 @@ class MCPTool(BaseTool):
                 root_cause="high-risk ops were not approved",
                 retry="approve the MCP invocation and use full permission",
             )
-        if context.metadata.get("mcp_network_approved") is False:
+        transports = context.metadata.get("mcp_server_transports") or {}
+        transport = transports.get(request.server) if isinstance(transports, dict) else None
+        network_flag = context.metadata.get("mcp_network_approved")
+        if network_flag is False and transport != "stdio":
             return ToolResult.blocked(
                 "MCP HTTP transport requires network approval",
                 root_cause="mcp network capability was not granted",

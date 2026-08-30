@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+import logging
+from typing import Any
 
 from .message import Message
 
+logger = logging.getLogger(__name__)
+
 
 class Memory:
-    def __init__(self, chroma_collection: Optional[Any] = None):
+    def __init__(self, chroma_collection: Any | None = None):
         self.messages: list[Message] = []
         self.working: list[Message] = []
         self.chroma_collection = chroma_collection
@@ -30,8 +33,8 @@ class Memory:
                     ],
                     ids=[message.id],
                 )
-            except Exception:
-                pass
+            except Exception as exc:  # Vector memory is an optional best-effort backend.
+                logger.debug("vector memory add failed: %s", exc)
 
     def get_by_actions(self, action_types: list[str]) -> list[Message]:
         return [m for m in self.messages if m.cause_by in action_types]

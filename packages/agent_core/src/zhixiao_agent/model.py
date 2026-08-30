@@ -14,6 +14,28 @@ import httpx
 from .types import ModelTurn, ToolCall
 
 
+class ModelError(RuntimeError):
+    """Base error exposed by model adapters with stable retry semantics."""
+
+    retryable = False
+
+
+class TransientModelError(ModelError):
+    retryable = True
+
+
+class ModelAuthenticationError(ModelError):
+    pass
+
+
+class ModelContextError(ModelError):
+    pass
+
+
+class InvalidModelResponseError(ModelError):
+    pass
+
+
 class CodingModel(ABC):
     @abstractmethod
     async def complete(
@@ -35,6 +57,9 @@ class ModelProfile:
     max_concurrency: int = 4
     input_cost_per_million: float = 0.0
     output_cost_per_million: float = 0.0
+    max_retries: int = 2
+    retry_base_seconds: float = 0.5
+    retry_max_seconds: float = 8.0
 
 
 @dataclass
@@ -84,27 +109,56 @@ class OpenAICompatibleModel(CodingModel):
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
-        async with self._semaphore:
-            await self._throttle()
-            response = await self.client.post(
-                f"{self.profile.api_base.rstrip('/')}/chat/completions",
-                headers={"Authorization": f"Bearer {self.profile.api_key}"},
-                json=payload,
+        response: httpx.Response | None = None
+        for attempt in range(self.profile.max_retries + 1):
+            cause: Exception | None = None
+            try:
+                async with self._semaphore:
+                    await self._throttle()
+                    response = await self.client.post(
+                        f"{self.profile.api_base.rstrip('/')}/chat/completions",
+                        headers={"Authorization": f"Bearer {self.profile.api_key}"},
+                        json=payload,
+                    )
+                self._raise_for_status(response)
+                break
+            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                error = TransientModelError(str(exc))
+                cause = exc
+            except TransientModelError as exc:
+                error = exc
+                cause = exc
+            if attempt >= self.profile.max_retries:
+                raise error from cause
+            retry_after = self._retry_after(response)
+            delay = retry_after if retry_after is not None else min(
+                self.profile.retry_base_seconds * (2**attempt),
+                self.profile.retry_max_seconds,
             )
-        response.raise_for_status()
-        body = response.json()
-        message = body["choices"][0]["message"]
+            jitter = (time.monotonic_ns() % 251) / 1_000 * min(delay * 0.1, 0.25)
+            await asyncio.sleep(delay + jitter)
+        assert response is not None
+        try:
+            body = response.json()
+            message = body["choices"][0]["message"]
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            raise InvalidModelResponseError("model returned an invalid response envelope") from exc
         calls = []
-        for raw in message.get("tool_calls", []):
-            function = raw["function"]
-            arguments = function.get("arguments") or "{}"
-            calls.append(
-                ToolCall(
-                    id=raw.get("id", function["name"]),
-                    name=function["name"],
-                    arguments=json.loads(arguments) if isinstance(arguments, str) else arguments,
+        try:
+            for raw in message.get("tool_calls", []):
+                function = raw["function"]
+                arguments = function.get("arguments") or "{}"
+                calls.append(
+                    ToolCall(
+                        id=raw.get("id", function["name"]),
+                        name=function["name"],
+                        arguments=(
+                            json.loads(arguments) if isinstance(arguments, str) else arguments
+                        ),
+                    )
                 )
-            )
+        except (ValueError, KeyError, TypeError) as exc:
+            raise InvalidModelResponseError("model returned invalid tool-call arguments") from exc
         usage = body.get("usage", {})
         prompt_tokens = int(usage.get("prompt_tokens", 0))
         completion_tokens = int(usage.get("completion_tokens", 0))
@@ -125,6 +179,31 @@ class OpenAICompatibleModel(CodingModel):
             cost_usd=cost,
         )
 
+    @staticmethod
+    def _retry_after(response: httpx.Response | None) -> float | None:
+        if response is None:
+            return None
+        raw = response.headers.get("Retry-After")
+        if raw is None:
+            return None
+        try:
+            return max(float(raw), 0.0)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _raise_for_status(response: httpx.Response) -> None:
+        status = response.status_code
+        if status < 400:
+            return
+        if status in {401, 403}:
+            raise ModelAuthenticationError(f"model authentication failed ({status})")
+        if status in {400, 413, 422}:
+            raise ModelContextError(f"model rejected the request ({status})")
+        if status in {408, 409, 425, 429} or status >= 500:
+            raise TransientModelError(f"model service is temporarily unavailable ({status})")
+        raise ModelError(f"model request failed ({status})")
+
 
 class FallbackModel(CodingModel):
     """Use the fallback only for transport, rate-limit, or invalid-response failures."""
@@ -142,7 +221,7 @@ class FallbackModel(CodingModel):
     ) -> ModelTurn:
         try:
             return await self.primary.complete(messages, tools=tools)
-        except (httpx.HTTPError, KeyError, ValueError, TypeError, json.JSONDecodeError):
+        except (TransientModelError, InvalidModelResponseError, httpx.HTTPError):
             self.fallback_count += 1
             return await self.fallback.complete(messages, tools=tools)
 

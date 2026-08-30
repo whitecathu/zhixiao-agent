@@ -45,6 +45,8 @@ class TaskRun(PKMixin, Base):
     workflow_id: Mapped[int | None] = mapped_column(BigInt, ForeignKey("workflow_definitions.id"))
     workflow_version: Mapped[int | None] = mapped_column(Integer)
     agent_id: Mapped[int | None] = mapped_column(BigInt, ForeignKey("agent_definitions.id"))
+    parent_run_id: Mapped[int | None] = mapped_column(BigInt, ForeignKey("task_runs.id"))
+    session_name: Mapped[str | None] = mapped_column(String(128))
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     prompt: Mapped[str] = mapped_column(LongText, nullable=False)
     permission_mode: Mapped[str] = mapped_column(String(16), default="edit", nullable=False)
@@ -53,11 +55,19 @@ class TaskRun(PKMixin, Base):
     current_step: Mapped[str | None] = mapped_column(String(128))
     diff_text: Mapped[str | None] = mapped_column(LongText)
     verification: Mapped[dict | None] = mapped_column(SAJSON)
+    termination_reason: Mapped[str | None] = mapped_column(String(64))
+    budget_snapshot: Mapped[dict | None] = mapped_column(SAJSON)
+    usage_snapshot: Mapped[dict | None] = mapped_column(SAJSON)
+    allow_unverified: Mapped[str | None] = mapped_column(String(512))
+    verification_commands: Mapped[list | None] = mapped_column(SAJSON)
     error_message: Mapped[str | None] = mapped_column(LongText)
     started_at: Mapped[datetime | None]
     finished_at: Mapped[datetime | None]
 
-    __table_args__ = (Index("idx_task_runs_space_status", "space_id", "status"),)
+    __table_args__ = (
+        Index("idx_task_runs_space_status", "space_id", "status"),
+        Index("idx_task_runs_parent", "parent_run_id"),
+    )
 
     @staticmethod
     def can_transition(current: str, target: str) -> bool:
@@ -146,6 +156,33 @@ class ModelProfile(PKMixin, Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
+class McpServer(PKMixin, Base):
+    """Secret-free MCP server definition.
+
+    Values in ``env_refs`` and ``credential_env`` are environment variable names,
+    never resolved credentials. The API control plane never starts or connects to
+    these definitions; execution remains an explicitly approved worker concern.
+    """
+
+    __tablename__ = "mcp_servers"
+    space_id: Mapped[int] = mapped_column(BigInt, nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    transport: Mapped[str] = mapped_column(String(16), nullable=False)
+    command: Mapped[str | None] = mapped_column(String(512))
+    arguments: Mapped[list] = mapped_column(SAJSON, default=list, nullable=False)
+    url: Mapped[str | None] = mapped_column(String(1024))
+    env_refs: Mapped[dict] = mapped_column(SAJSON, default=dict, nullable=False)
+    credential_env: Mapped[str | None] = mapped_column(String(128))
+    tool_allowlist: Mapped[list] = mapped_column(SAJSON, default=list, nullable=False)
+    startup_timeout_seconds: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
+    call_timeout_seconds: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("space_id", "name", name="uk_mcp_server_space_name"),
+    )
+
+
 class EvaluationRun(PKMixin, Base):
     __tablename__ = "evaluation_runs"
     space_id: Mapped[int] = mapped_column(BigInt, nullable=False)
@@ -202,6 +239,7 @@ __all__ = [
     "WorkflowDefinition",
     "AgentDefinition",
     "ModelProfile",
+    "McpServer",
     "EvaluationRun",
     "FineTuneJob",
     "KnowledgeEntity",

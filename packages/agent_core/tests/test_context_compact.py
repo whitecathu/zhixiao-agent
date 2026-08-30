@@ -58,7 +58,11 @@ def test_compacts_older_tool_and_assistant_into_summary() -> None:
 
     assert compacted[0]["role"] == "system"
     assert compacted[0]["content"] == "You are Zhixiao."
-    summary = next(msg for msg in compacted if "[conversation_summary]" in str(msg.get("content", "")))
+    summary = next(
+        msg
+        for msg in compacted
+        if "[conversation_summary]" in str(msg.get("content", ""))
+    )
     assert summary["role"] == "system"
     assert "- assistant" in summary["content"]
     assert "- tool" in summary["content"]
@@ -75,7 +79,7 @@ def test_does_not_orphan_tool_results_from_assistant_calls() -> None:
         {"role": "user", "content": "start"},
     ]
     for index in range(6):
-        messages.append(_assistant_with_tool(f"read_file", content=f"a{index}" + ("z" * 300)))
+        messages.append(_assistant_with_tool("read_file", content=f"a{index}" + ("z" * 300)))
         messages.append(_tool("read_file", f"payload {index}" + ("w" * 300)))
 
     compacted = compact_messages(messages, keep_pairs=1, char_budget=200)
@@ -86,3 +90,29 @@ def test_does_not_orphan_tool_results_from_assistant_calls() -> None:
         if role == "tool":
             assert index > 0
             assert recent_roles[index - 1] in {"assistant", "tool"}
+
+
+def test_preserves_request_project_rules_and_approved_plan_verbatim() -> None:
+    immutable = (
+        "Request: implement the API safely\n\n"
+        "Project instructions from AGENTS.md: never publish changes\n\n"
+        "Approved plan:\n1. Inspect src/api.py\n2. Run pytest\n"
+        "Permission: edit"
+    )
+    messages: list[dict] = [
+        {"role": "system", "content": "You are Zhixiao."},
+        {"role": "user", "content": immutable},
+    ]
+    for index in range(10):
+        messages.append(
+            _assistant_with_tool("read_file", content=f"step {index}" + ("x" * 200))
+        )
+        messages.append(
+            _tool("read_file", f"failure path=src/api.py stack={index}" + ("y" * 200))
+        )
+
+    compacted = compact_messages(messages, keep_pairs=2, char_budget=400)
+
+    assert compacted[1]["content"] == immutable
+    assert "never publish changes" in compacted[1]["content"]
+    assert "2. Run pytest" in compacted[1]["content"]

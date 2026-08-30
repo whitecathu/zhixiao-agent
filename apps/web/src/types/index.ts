@@ -64,6 +64,8 @@ export interface TaskItem {
   execution_id?: string | null;
   current_step?: string | null;
   verification?: Record<string, unknown> | null;
+  termination_reason?: string | null;
+  usage_snapshot?: Record<string, unknown> | null;
   error_message?: string | null;
   started_at?: string | null;
   finished_at?: string | null;

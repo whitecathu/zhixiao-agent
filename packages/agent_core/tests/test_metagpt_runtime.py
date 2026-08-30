@@ -209,3 +209,20 @@ async def test_metagpt_model_failure_returns_compatible_failed_result(tmp_path: 
         "run_finished",
     ]
     assert result.events[-3].data["failed"] is True
+
+
+@pytest.mark.asyncio
+async def test_metagpt_write_mode_requires_verification_or_waiver(tmp_path: Path) -> None:
+    model = ScriptedModel([ModelTurn(content="must not run")])
+    result = await run_metagpt_team(
+        "Implement a file",
+        tmp_path,
+        model=model,
+        permission=PermissionMode.EDIT,
+        roles_json='[{"name":"implementer","tools":["write_file"],"watch":[]}]',
+    )
+
+    assert result.status is RunStatus.FAILED
+    assert result.verification.outcome.value == "blocked"
+    assert result.termination_reason.value == "verification_blocked"
+    assert model.messages == []

@@ -211,6 +211,70 @@ async def test_subagent_and_mcp_use_audited_adapters(tmp_path: Path) -> None:
     assert mcp.status is ToolStatus.SUCCESS
 
 
+def _mcp_context(
+    tmp_path: Path,
+    *,
+    transports: dict[str, str] | None,
+    network_approved: bool | None,
+) -> ToolContext:
+    metadata: dict[str, Any] = {
+        "mcp": lambda server, tool, arguments: {
+            "server": server,
+            "tool": tool,
+            **arguments,
+        },
+        "mcp_whitelist": ["local:read", "docs:search"],
+    }
+    if transports is not None:
+        metadata["mcp_server_transports"] = transports
+    if network_approved is not None:
+        metadata["mcp_network_approved"] = network_approved
+    return context(tmp_path, full=True).model_copy(
+        update={
+            "ops_capabilities": frozenset({"mcp"}),
+            "metadata": metadata,
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_mcp_stdio_succeeds_without_network_approval(tmp_path: Path) -> None:
+    result = await MCPTool().execute(
+        {"server": "local", "tool": "read", "arguments": {"path": "README.md"}},
+        _mcp_context(
+            tmp_path,
+            transports={"local": "stdio", "docs": "http"},
+            network_approved=False,
+        ),
+    )
+    assert result.status is ToolStatus.SUCCESS
+    assert result.data["server"] == "local"
+
+
+@pytest.mark.asyncio
+async def test_mcp_http_blocked_without_network_approval(tmp_path: Path) -> None:
+    result = await MCPTool().execute(
+        {"server": "docs", "tool": "search", "arguments": {"q": "agent"}},
+        _mcp_context(
+            tmp_path,
+            transports={"local": "stdio", "docs": "http"},
+            network_approved=False,
+        ),
+    )
+    assert result.status is ToolStatus.BLOCKED
+    assert "network" in (result.root_cause or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_mcp_unknown_transport_blocked_without_network_approval(tmp_path: Path) -> None:
+    result = await MCPTool().execute(
+        {"server": "local", "tool": "read", "arguments": {"path": "README.md"}},
+        _mcp_context(tmp_path, transports={}, network_approved=False),
+    )
+    assert result.status is ToolStatus.BLOCKED
+    assert "network" in (result.root_cause or "").lower()
+
+
 @pytest.mark.asyncio
 async def test_background_command_can_be_observed(tmp_path: Path) -> None:
     full = context(tmp_path, full=True)

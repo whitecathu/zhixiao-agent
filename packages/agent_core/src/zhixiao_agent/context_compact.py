@@ -7,6 +7,16 @@ DEFAULT_KEEP_PAIRS = 8
 DEFAULT_CHAR_BUDGET = 60_000
 _SUMMARY_TAG = "[conversation_summary]"
 _MAX_BULLET_CHARS = 160
+_IMMUTABLE_MARKERS = (
+    "Request:",
+    "Project instructions",
+    "AGENTS.md",
+    "AGENT.md",
+    "Claude.md",
+    "Approved plan:",
+    "Permission:",
+    "SKILL.md",
+)
 
 
 def message_char_count(messages: list[dict[str, Any]]) -> int:
@@ -42,7 +52,7 @@ def compact_messages(
     if message_char_count(messages) <= char_budget:
         return list(messages)
 
-    leading, body = _split_leading_system(messages)
+    leading, body = _split_leading_immutable(messages)
     keep_count = keep_pairs * 2
     if len(body) <= keep_count:
         return list(messages)
@@ -74,17 +84,21 @@ def maybe_compact_messages(
     return compact_messages(messages, keep_pairs=keep_pairs, char_budget=char_budget)
 
 
-def _split_leading_system(
+def _split_leading_immutable(
     messages: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     leading: list[dict[str, Any]] = []
     index = 0
     while index < len(messages):
         message = messages[index]
-        if message.get("role") != "system":
-            break
         content = message.get("content") or ""
         if isinstance(content, str) and _SUMMARY_TAG in content:
+            break
+        is_system = message.get("role") == "system"
+        is_immutable_user = message.get("role") == "user" and isinstance(content, str) and any(
+            marker in content for marker in _IMMUTABLE_MARKERS
+        )
+        if not (is_system or is_immutable_user):
             break
         leading.append(message)
         index += 1

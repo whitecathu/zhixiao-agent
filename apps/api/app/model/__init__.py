@@ -10,6 +10,7 @@ from app.model.platform import (
     FineTuneJob,
     KnowledgeEntity,
     KnowledgeRelation,
+    McpServer,
     ModelProfile,
     Repository,
     RunStep,
@@ -33,6 +34,7 @@ __all__ = [
     "FineTuneJob",
     "KnowledgeEntity",
     "KnowledgeRelation",
+    "McpServer",
     "OnboardingState",
     "SpaceOnboardingConfig",
 ]

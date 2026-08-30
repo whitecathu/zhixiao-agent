@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -20,11 +21,17 @@ from .tools.registry import READ_ONLY_TOOLS
 from .types import (
     AgentEvent,
     PermissionMode,
+    RunBudget,
     RunResult,
     RunStatus,
+    RunUsage,
     TaskType,
+    TerminationReason,
     ToolResult,
     ToolStatus,
+    VerificationOutcome,
+    VerificationResult,
+    VerificationStage,
 )
 
 EventSink = Callable[[dict[str, Any]], Awaitable[None]]
@@ -261,12 +268,17 @@ async def run_metagpt_team(
     max_iterations: int = 6,
     max_tool_iterations: int = 5,
     tool_metadata: dict[str, Any] | None = None,
+    budget: RunBudget | None = None,
+    allow_unverified: str | None = None,
+    verification_commands: tuple[str, ...] = (),
 ) -> RunResult:
     """Execute an opt-in MetaGPT Team and return a RunResult-shaped payload."""
     rid = run_id or uuid.uuid4().hex
     tools = registry or build_default_registry()
     role_specs = _parse_roles(roles_json)
     events: list[dict[str, Any]] = []
+    run_budget = budget or RunBudget()
+    started_at = time.monotonic()
 
     async def emit(event: str, data: dict[str, Any]) -> None:
         sequence = (events[-1]["sequence"] + 1) if events else 1
@@ -305,6 +317,41 @@ async def run_metagpt_team(
         hired.append(role)
         team.hire([role])
 
+    if (
+        permission is not PermissionMode.READ_ONLY
+        and not verification_commands
+        and not allow_unverified
+    ):
+        await emit(
+            "verification_skipped",
+            {
+                "outcome": VerificationOutcome.BLOCKED.value,
+                "reason": "write-mode MetaGPT run requires verification or an explicit waiver",
+            },
+        )
+        await emit(
+            "run_finished",
+            {
+                "status": RunStatus.FAILED.value,
+                "termination_reason": TerminationReason.VERIFICATION_BLOCKED.value,
+            },
+        )
+        return RunResult(
+            run_id=rid,
+            status=RunStatus.FAILED,
+            summary="MetaGPT write run was blocked before execution.",
+            task_type=TaskType.FEATURE,
+            plan=[f"MetaGPT role: {role.name}" for role in hired],
+            events=[AgentEvent.model_validate(event) for event in events],
+            verification=VerificationResult(
+                outcome=VerificationOutcome.BLOCKED,
+                reason="write-mode MetaGPT run requires verification or an explicit waiver",
+            ),
+            termination_reason=TerminationReason.VERIFICATION_BLOCKED,
+            budgets=run_budget,
+            next_actions=["provide verification_commands or an explicit waiver"],
+        )
+
     try:
         results = await team.run(prompt, max_iterations=max_iterations)
     except Exception as exc:
@@ -325,10 +372,123 @@ async def run_metagpt_team(
             diff="",
             events=[AgentEvent.model_validate(event) for event in events],
             error=str(exc),
+            termination_reason=TerminationReason.MODEL_ERROR,
+            budgets=run_budget,
+            next_actions=["inspect the MetaGPT model failure and retry"],
         )
     summary_parts = [f"{name}: {out.result}" for name, out in results.items()]
     success = all(out.is_success for out in results.values()) if results else True
-    await emit("run_finished", {"status": "succeeded" if success else "failed"})
+    model_events = [event for event in events if event["event"] == "model_turn"]
+    tool_events = [event for event in events if event["event"] == "tool_result"]
+    usage = RunUsage(
+        model_turns=len(model_events),
+        tool_calls=len(tool_events),
+        prompt_tokens=sum(int(event["data"].get("prompt_tokens") or 0) for event in model_events),
+        completion_tokens=sum(
+            int(event["data"].get("completion_tokens") or 0) for event in model_events
+        ),
+        cost_usd=sum(float(event["data"].get("cost_usd") or 0) for event in model_events),
+        elapsed_seconds=max(time.monotonic() - started_at, 0.0),
+    )
+    budget_reason: str | None = None
+    if usage.model_turns > run_budget.max_model_turns:
+        budget_reason = f"model turn budget exhausted ({run_budget.max_model_turns})"
+    elif usage.tool_calls > run_budget.max_tool_calls:
+        budget_reason = f"tool call budget exhausted ({run_budget.max_tool_calls})"
+    elif usage.prompt_tokens + usage.completion_tokens > run_budget.max_tokens:
+        budget_reason = f"token budget exhausted ({run_budget.max_tokens})"
+    elif run_budget.max_cost_usd is not None and usage.cost_usd > run_budget.max_cost_usd:
+        budget_reason = f"cost budget exhausted (${run_budget.max_cost_usd:.4f})"
+    elif usage.elapsed_seconds > run_budget.max_duration_seconds:
+        budget_reason = f"duration budget exhausted ({run_budget.max_duration_seconds}s)"
+    if budget_reason:
+        success = False
+    stages: list[VerificationStage] = []
+    verification = VerificationResult(
+        outcome=VerificationOutcome.SKIPPED,
+        reason=(
+            "read-only run does not require executable verification"
+            if permission is PermissionMode.READ_ONLY
+            else "verification explicitly waived"
+        ),
+        waived=permission is not PermissionMode.READ_ONLY and bool(allow_unverified),
+        waiver_reason=allow_unverified,
+    )
+    test_exit_code: int | None = None
+    failure_reason: str | None = None
+    if success and verification_commands:
+        context = ToolContext(
+            workspace=workspace,
+            permission=permission,
+            runner=LocalRunner(workspace),
+            approved=approved,
+        )
+        for index, command in enumerate(verification_commands):
+            result = await tools.execute(
+                "run_tests",
+                {"command": command},
+                context,
+                allowed={"run_tests"},
+            )
+            test_exit_code = (
+                (result.data or {}).get("exit_code")
+                if isinstance(result.data, dict)
+                else None
+            )
+            outcome = (
+                VerificationOutcome.PASSED
+                if result.status is ToolStatus.SUCCESS and test_exit_code == 0
+                else VerificationOutcome.FAILED
+            )
+            stages.append(
+                VerificationStage(
+                    name="focused" if index == 0 else f"stage_{index + 1}",
+                    command=command,
+                    outcome=outcome,
+                    exit_code=test_exit_code,
+                    summary=result.summary,
+                    artifacts=result.artifacts,
+                )
+            )
+            await emit(
+                "verification_finished",
+                {
+                    "stage": stages[-1].name,
+                    "command": command,
+                    "exit_code": test_exit_code,
+                    "status": result.status.value,
+                },
+            )
+            if outcome is VerificationOutcome.FAILED:
+                success = False
+                failure_reason = result.root_cause or result.summary
+                break
+        verification = VerificationResult(
+            outcome=(
+                VerificationOutcome.PASSED if success else VerificationOutcome.FAILED
+            ),
+            reason=(
+                "all required verification stages passed"
+                if success
+                else failure_reason or "verification failed"
+            ),
+            stages=stages,
+        )
+    await emit(
+        "run_finished",
+        {
+            "status": "succeeded" if success else "failed",
+            "termination_reason": (
+                TerminationReason.COMPLETED.value
+                if success
+                else TerminationReason.BUDGET_EXHAUSTED.value
+                if budget_reason
+                else TerminationReason.VERIFICATION_FAILED.value
+                if verification.outcome is VerificationOutcome.FAILED
+                else TerminationReason.RUNTIME_ERROR.value
+            ),
+        },
+    )
     return RunResult(
         run_id=rid,
         status=RunStatus.SUCCEEDED if success else RunStatus.FAILED,
@@ -337,10 +497,29 @@ async def run_metagpt_team(
         plan=[f"MetaGPT role: {name}" for name in results],
         artifacts=[],
         test_command=None,
-        test_exit_code=None,
+        test_exit_code=test_exit_code,
         diff="",
         events=[AgentEvent.model_validate(event) for event in events],
-        error=None if success else "one or more roles failed",
+        error=None if success else budget_reason or failure_reason or "one or more roles failed",
+        verification=verification,
+        termination_reason=(
+            TerminationReason.COMPLETED
+            if success
+            else TerminationReason.BUDGET_EXHAUSTED
+            if budget_reason
+            else TerminationReason.VERIFICATION_FAILED
+            if verification.outcome is VerificationOutcome.FAILED
+            else TerminationReason.RUNTIME_ERROR
+        ),
+        usage=usage,
+        budgets=run_budget,
+        next_actions=(
+            []
+            if success
+            else ["increase the relevant run budget after reviewing usage"]
+            if budget_reason
+            else ["inspect the failed role or verification stage"]
+        ),
     )
 
 

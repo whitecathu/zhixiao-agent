@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ipaddress
+import re
 from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -69,13 +71,40 @@ class WorkspaceOut(ORMOut):
     status: str
 
 
+class RunBudgetInput(BaseModel):
+    max_model_turns: int = Field(default=30, ge=1, le=1_000)
+    max_tool_calls: int = Field(default=50, ge=1, le=10_000)
+    max_tokens: int = Field(default=200_000, ge=1, le=100_000_000)
+    max_cost_usd: float | None = Field(default=None, gt=0, le=100_000)
+    max_duration_seconds: int = Field(default=1_800, ge=1, le=604_800)
+
+
 class TaskRunCreate(BaseModel):
     repository_id: int
     title: str = Field(min_length=2, max_length=255)
     prompt: str = Field(min_length=10)
     workflow_id: int | None = None
     agent_id: int | None = None
+    session_name: str | None = Field(default=None, min_length=1, max_length=128)
     permission_mode: Literal["read_only", "edit", "execute", "full"] = "edit"
+    budget: RunBudgetInput = Field(default_factory=lambda: RunBudgetInput())
+    allow_unverified: str | None = Field(default=None, min_length=3, max_length=512)
+    verification_commands: list[str] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="after")
+    def normalize_verification_commands(self) -> TaskRunCreate:
+        commands = [command.strip() for command in self.verification_commands]
+        if any(not command for command in commands):
+            raise ValueError("verification_commands must not contain blank commands")
+        self.verification_commands = commands
+        return self
+
+
+class TaskRunFork(BaseModel):
+    title: str | None = Field(default=None, min_length=2, max_length=255)
+    prompt: str | None = Field(default=None, min_length=10)
+    session_name: str | None = Field(default=None, min_length=1, max_length=128)
+    permission_mode: Literal["read_only", "edit", "execute", "full"] | None = None
 
 
 class TaskRunOut(ORMOut):
@@ -85,6 +114,8 @@ class TaskRunOut(ORMOut):
     workflow_id: int | None
     workflow_version: int | None
     agent_id: int | None
+    parent_run_id: int | None
+    session_name: str | None
     title: str
     prompt: str
     permission_mode: str
@@ -92,6 +123,11 @@ class TaskRunOut(ORMOut):
     execution_id: str | None
     current_step: str | None
     verification: dict[str, Any] | None
+    termination_reason: str | None
+    budget_snapshot: dict[str, Any] | None
+    usage_snapshot: dict[str, Any] | None
+    allow_unverified: str | None
+    verification_commands: list[str] | None
     error_message: str | None
     started_at: datetime | None
     finished_at: datetime | None
@@ -494,6 +530,93 @@ class ModelProfileUpdate(BaseModel):
         return self
 
 
+class McpServerCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    transport: Literal["stdio", "streamable_http"]
+    command: str | None = Field(default=None, min_length=1, max_length=512)
+    arguments: list[str] = Field(default_factory=list, max_length=64)
+    url: str | None = Field(default=None, max_length=1024)
+    env_refs: dict[str, str] = Field(default_factory=dict)
+    credential_env: str | None = Field(default=None, pattern=r"^[A-Z][A-Z0-9_]*$")
+    tool_allowlist: list[str] = Field(default_factory=list, max_length=128)
+    startup_timeout_seconds: int = Field(default=10, ge=1, le=120)
+    call_timeout_seconds: int = Field(default=60, ge=1, le=600)
+    enabled: bool = True
+
+    @model_validator(mode="after")
+    def validate_definition(self) -> McpServerCreate:
+        _validate_mcp_server(self)
+        return self
+
+
+class McpServerUpdate(BaseModel):
+    name: str | None = Field(
+        default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    )
+    transport: Literal["stdio", "streamable_http"] | None = None
+    command: str | None = Field(default=None, min_length=1, max_length=512)
+    arguments: list[str] | None = Field(default=None, max_length=64)
+    url: str | None = Field(default=None, max_length=1024)
+    env_refs: dict[str, str] | None = None
+    credential_env: str | None = Field(default=None, pattern=r"^[A-Z][A-Z0-9_]*$")
+    tool_allowlist: list[str] | None = Field(default=None, max_length=128)
+    startup_timeout_seconds: int | None = Field(default=None, ge=1, le=120)
+    call_timeout_seconds: int | None = Field(default=None, ge=1, le=600)
+    enabled: bool | None = None
+
+    @model_validator(mode="after")
+    def require_changes(self) -> McpServerUpdate:
+        if not self.model_fields_set:
+            raise ValueError("at least one MCP server field is required")
+        return self
+
+
+class McpServerOut(ORMOut):
+    space_id: int
+    name: str
+    transport: str
+    command: str | None
+    arguments: list[str]
+    url: str | None
+    env_refs: dict[str, str]
+    credential_env: str | None
+    tool_allowlist: list[str]
+    startup_timeout_seconds: int
+    call_timeout_seconds: int
+    enabled: bool
+
+
+def _validate_mcp_server(value: McpServerCreate) -> None:
+    env_name = r"^[A-Z][A-Z0-9_]*$"
+    if any(
+        not re.fullmatch(env_name, key) or not re.fullmatch(env_name, ref)
+        for key, ref in value.env_refs.items()
+    ):
+        raise ValueError("env_refs keys and values must be environment variable names")
+    if len(set(value.tool_allowlist)) != len(value.tool_allowlist):
+        raise ValueError("tool_allowlist must be unique")
+    if value.transport == "stdio":
+        if not value.command or value.url is not None:
+            raise ValueError("stdio requires command and forbids url")
+    else:
+        if value.command is not None or value.arguments:
+            raise ValueError("streamable_http forbids command and arguments")
+        if not value.url:
+            raise ValueError("streamable_http requires url")
+        parsed = urlsplit(value.url)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("streamable_http url must be credential-free HTTPS")
+        hostname = parsed.hostname.rstrip(".").lower()
+        if hostname == "localhost" or hostname.endswith(".localhost"):
+            raise ValueError("streamable_http url must not target localhost")
+        try:
+            address = ipaddress.ip_address(hostname)
+        except ValueError:
+            address = None
+        if address is not None and not address.is_global:
+            raise ValueError("streamable_http url must not target a non-public IP address")
+
+
 class EvaluationCreate(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
     dataset_name: str = Field(min_length=1, max_length=255)
@@ -569,6 +692,7 @@ class WebApprovalDecision(ApprovalDecision):
 
 
 class WorkerRunResult(BaseModel):
+    schema_version: str = "1.0"
     run_id: str
     status: Literal["succeeded", "failed", "interrupted", "awaiting_approval"]
     summary: str = ""
@@ -580,6 +704,11 @@ class WorkerRunResult(BaseModel):
     diff: str = ""
     events: list[dict[str, Any]] = Field(default_factory=list)
     error: str | None = None
+    verification: dict[str, Any] = Field(default_factory=dict)
+    termination_reason: str | None = None
+    usage: dict[str, Any] = Field(default_factory=dict)
+    budgets: dict[str, Any] = Field(default_factory=dict)
+    next_actions: list[str] = Field(default_factory=list)
 
 
 class ToolDescriptor(BaseModel):

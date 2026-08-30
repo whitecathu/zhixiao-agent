@@ -22,6 +22,60 @@ jobs:
       - run: ruff check --config pyproject.toml packages/agent_core/src packages/agent_core/tests
       - run: mypy --config-file pyproject.toml packages/agent_core/src
       - run: pytest -q packages/agent_core/tests --cov=zhixiao_agent --cov-report=xml
+      - name: Smoke test CLI help, version, and machine output
+        shell: bash
+        run: |
+          set -euo pipefail
+          zhixiao --help >/dev/null
+          zhixiao run --help >/dev/null
+          zhixiao version | grep -E '^zhixiao [^ ]+ \(protocol [^ ]+\)$'
+
+          smoke_workspace="$(mktemp -d)"
+          zhixiao plugins doctor --workspace "$smoke_workspace"
+          zhixiao run "Inspect this workspace without modifying it" \
+            --workspace "$smoke_workspace" \
+            --offline \
+            --permission read_only \
+            --approval-policy never \
+            --output-format json \
+            --events none >cli-smoke.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("cli-smoke.json").read_text(encoding="utf-8"))
+          assert payload["schema_version"]
+          assert payload["run_id"]
+          assert payload["status"] == "succeeded"
+          assert payload["verification"]["outcome"] == "skipped"
+          assert payload["termination_reason"] == "completed"
+          assert isinstance(payload["usage"], dict)
+          assert isinstance(payload["budgets"], dict)
+          PY
+
+          zhixiao run "Inspect this workspace without modifying it" \
+            --workspace "$smoke_workspace" \
+            --offline \
+            --permission read_only \
+            --approval-policy never \
+            --output-format jsonl \
+            --events jsonl >cli-smoke.jsonl
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          events = [
+              json.loads(line)
+              for line in Path("cli-smoke.jsonl").read_text(encoding="utf-8").splitlines()
+              if line.strip()
+          ]
+          assert events
+          assert events[-1]["event"] == "result"
+          assert events[-1]["data"]["status"] == "succeeded"
+          assert isinstance(events[-1]["data"]["verification"], dict)
+          assert isinstance(events[-1]["data"]["usage"], dict)
+          assert isinstance(events[-1]["data"]["budgets"], dict)
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: agent-core-coverage
@@ -92,8 +146,10 @@ jobs:
       - run: pip install --index-url https://pypi.org/simple -e "packages/agent_core[dev]"
       - run: python -m unittest discover -s tests/evals -p "test_*.py"
       - run: python tests/evals/run_scenarios.py --validate-only --output evaluation-manifest.json
+      - run: python tests/evals/run_behavioral.py
       - run: python tests/evals/run_offline_gates.py
-      # Summarizes checked-in fixture evidence; this is not live model evaluation.
+      # Fixture metrics are provenance for the report pipeline, not a quality score.
+      # Behavioral gates above actually run AgentRuntime with ScriptedModel.
       - run: |
           python tests/evals/run_scenarios.py \
             --results tests/evals/fixtures/offline_harness_results.json \
@@ -105,6 +161,7 @@ jobs:
             evaluation-manifest.json
             offline-fixture-report.json
             tests/evals/artifacts/offline_report.json
+            tests/evals/artifacts/behavioral_report.json
 
   security:
     runs-on: ubuntu-latest

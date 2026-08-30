@@ -53,3 +53,43 @@ async def test_fallback_model_uses_backup_after_transport_failure() -> None:
     turn = await model.complete([{"role": "user", "content": "hello"}])
     assert turn.model == "backup"
     assert model.fallback_count == 1
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_model_retries_429_and_honors_retry_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(429, headers={"Retry-After": "0"})
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "ok"}}]},
+        )
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr("zhixiao_agent.model.asyncio.sleep", fake_sleep)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    model = OpenAICompatibleModel(
+        ModelProfile(
+            provider="test",
+            model="test-model",
+            api_base="https://model.test/v1",
+            api_key="secret",
+            max_retries=1,
+        ),
+        client=client,
+    )
+    turn = await model.complete([{"role": "user", "content": "hello"}])
+    await client.aclose()
+
+    assert turn.content == "ok"
+    assert calls == 2
+    assert sleeps == [0.0]

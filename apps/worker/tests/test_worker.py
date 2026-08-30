@@ -18,11 +18,54 @@ from zhixiao_agent.job_security import (
     sign_job_fields,
 )
 
+ECHO_PLUGIN = """
+from pydantic import BaseModel
+
+from zhixiao_agent.plugin import PluginContext
+from zhixiao_agent.tools.base import BaseTool
+from zhixiao_agent.types import ToolResult
+
+name = "echo"
+inject = ("tools",)
+
+class EchoInput(BaseModel):
+    text: str = ""
+
+class EchoTool(BaseTool):
+    name = "echo_plugin"
+    description = "Echo text from a workspace plugin"
+    input_model = EchoInput
+
+    async def execute(self, arguments, context):
+        del context
+        return ToolResult.ok(arguments.get("text") or "")
+
+def apply(ctx: PluginContext) -> None:
+    ctx.register_tool(EchoTool())
+    ctx.register_command(
+        "echo",
+        description="Expand an echo prompt",
+        template="Echo {{args}}",
+        mode="ask",
+    )
+    ctx.register_prompt_section("echo", "You may call echo_plugin.")
+    ctx.on("run/start", lambda payload: payload.setdefault("seen", True))
+"""
+
+
+def _write_echo_plugin(workspace: Path) -> Path:
+    directory = workspace / ".zhixiao" / "plugins"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "echo.py"
+    path.write_text(ECHO_PLUGIN, encoding="utf-8")
+    return path
+
 
 @pytest.fixture(autouse=True)
 def managed_workspace_root(tmp_path, monkeypatch):
     monkeypatch.setenv("WORKSPACE_BASE", str(tmp_path))
     monkeypatch.setenv("WORKSPACE_SOURCE_ROOTS", str(tmp_path))
+    monkeypatch.setenv("ZHIXIAO_CONFIG_FILE", str(tmp_path / "user-config.toml"))
 
 
 class FakeRedis:
@@ -142,6 +185,63 @@ def test_build_runtime_enables_experimental_registry_for_mcp_whitelist(monkeypat
     runtime = worker.build_runtime()
     assert runtime.registry.get("mcp") is not None
     assert runtime.registry.get("sub_agent") is not None
+
+
+def test_assemble_job_registry_skips_untrusted_workspace_plugin(tmp_path):
+    _write_echo_plugin(tmp_path)
+    registry = worker.assemble_job_registry(
+        tmp_path, trusted=False, include_experimental=False
+    )
+    assert registry.get("echo_plugin") is None
+
+
+def test_assemble_job_registry_includes_trusted_workspace_plugin(tmp_path):
+    _write_echo_plugin(tmp_path)
+    registry = worker.assemble_job_registry(
+        tmp_path, trusted=True, include_experimental=False
+    )
+    assert registry.get("echo_plugin") is not None
+
+
+@pytest.mark.asyncio
+async def test_process_job_loads_trusted_plugin_prompt(tmp_path, monkeypatch):
+    _write_echo_plugin(tmp_path)
+    client = FakeRedis()
+    captured = []
+
+    class Result:
+        def model_dump(self, **kwargs):
+            return {
+                "run_id": "plugin-1",
+                "status": "succeeded",
+                "summary": "done",
+                "events": [],
+            }
+
+    class Runtime:
+        async def run(self, prompt, workspace, config, *, run_id):
+            captured.append((self.registry, config))
+            return Result()
+
+    async def fake_post(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(worker, "post_result", fake_post)
+    runtime = Runtime()
+    await worker.process_job(
+        client,
+        runtime,
+        {
+            "run_id": "plugin-1",
+            "prompt": "inspect plugins",
+            "permission_mode": "read_only",
+            "workspace": str(tmp_path),
+            "trusted_workspace": "true",
+        },
+    )
+    registry, config = captured[0]
+    assert registry.get("echo_plugin") is not None
+    assert "echo_plugin" in (config.plugin_prompt or "")
 
 
 def test_build_tool_metadata_includes_mcp_handler(monkeypatch, tmp_path):
@@ -309,6 +409,80 @@ async def test_process_job_supports_legacy_and_versioned_workflow_config(tmp_pat
     )
     assert captured[1].workflow_definition == workflow
     assert captured[1].workflow_version == 3
+
+
+@pytest.mark.asyncio
+async def test_process_job_passes_verification_budget_and_waiver(tmp_path, monkeypatch):
+    client = FakeRedis()
+    captured = []
+
+    class Result:
+        def model_dump(self, **kwargs):
+            return {
+                "run_id": "budget-1",
+                "status": "succeeded",
+                "summary": "done",
+                "events": [],
+            }
+
+    class Runtime:
+        async def run(self, prompt, workspace, config, *, run_id):
+            captured.append(config)
+            return Result()
+
+    async def fake_post(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(worker, "post_result", fake_post)
+    await worker.process_job(
+        client,
+        Runtime(),
+        {
+            "run_id": "budget-1",
+            "prompt": "verify configured limits",
+            "permission_mode": "read_only",
+            "workspace": str(tmp_path),
+            "allow_unverified": "CI image has no browser",
+            "verification_commands": json.dumps(["pytest -q", "ruff check ."]),
+            "max_model_turns": "7",
+            "max_tool_calls": "11",
+            "max_tokens": "12000",
+            "max_cost_usd": "1.25",
+            "max_duration_seconds": "300",
+        },
+    )
+
+    config = captured[0]
+    assert config.allow_unverified == "CI image has no browser"
+    assert config.verification_commands == ("pytest -q", "ruff check .")
+    assert config.budget.max_model_turns == 7
+    assert config.budget.max_tool_calls == 11
+    assert config.budget.max_tokens == 12000
+    assert config.budget.max_cost_usd == 1.25
+    assert config.budget.max_duration_seconds == 300
+
+
+def test_runtime_budget_rejects_invalid_signed_values():
+    with pytest.raises(PermissionError, match="max_tokens"):
+        worker._runtime_budget({"max_tokens": "0"})
+    with pytest.raises(PermissionError, match="verification_commands"):
+        worker._parse_verification_commands({"verification_commands": "not-json"})
+
+
+def test_terminal_payload_uses_the_versioned_result_contract():
+    payload = worker._terminal_payload(
+        "run-1",
+        status="failed",
+        summary="failed safely",
+        error="boom",
+        test_command=None,
+        termination_reason="runtime_error",
+    )
+    assert payload["schema_version"] == "1.1"
+    assert payload["verification"]["outcome"] == "blocked"
+    assert payload["termination_reason"] == "runtime_error"
+    assert payload["budgets"]["max_model_turns"] > 0
+    assert payload["usage"]["tool_calls"] == 0
 
 
 @pytest.mark.asyncio

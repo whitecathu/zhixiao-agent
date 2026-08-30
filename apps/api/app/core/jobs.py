@@ -41,6 +41,13 @@ class RunJob:
     workflow_version: str = ""
     engine: str = "langgraph"
     roles_json: str = ""
+    allow_unverified: str = ""
+    verification_commands: str = "[]"
+    max_model_turns: str = "30"
+    max_tool_calls: str = "50"
+    max_tokens: str = "200000"
+    max_cost_usd: str = ""
+    max_duration_seconds: str = "1800"
 
     def fields(self) -> dict[str, str]:
         fields = {
@@ -62,6 +69,13 @@ class RunJob:
             "workflow_version": self.workflow_version,
             "engine": self.engine,
             "roles_json": self.roles_json,
+            "allow_unverified": self.allow_unverified,
+            "verification_commands": self.verification_commands,
+            "max_model_turns": self.max_model_turns,
+            "max_tool_calls": self.max_tool_calls,
+            "max_tokens": self.max_tokens,
+            "max_cost_usd": self.max_cost_usd,
+            "max_duration_seconds": self.max_duration_seconds,
             ISSUED_AT_FIELD: str(int(time.time())),
             NONCE_FIELD: secrets.token_hex(16),
         }

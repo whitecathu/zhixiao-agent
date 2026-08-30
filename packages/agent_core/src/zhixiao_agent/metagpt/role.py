@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -16,7 +16,7 @@ class ActionOutput(BaseModel):
     code: str = ""
     result: Any = None
     is_success: bool = True
-    metadata: dict = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class BaseRole(BaseModel, ABC):
@@ -27,7 +27,7 @@ class BaseRole(BaseModel, ABC):
     goal: str
     tools: list[str] = Field(default_factory=list)
     watch: list[str] = Field(default_factory=list)
-    state: dict = Field(default_factory=dict)
+    state: dict[str, Any] = Field(default_factory=dict)
 
     @abstractmethod
     async def _think(self) -> bool: ...
@@ -41,7 +41,7 @@ class BaseRole(BaseModel, ABC):
             return True
         return False
 
-    async def run(self, message: Optional[Message] = None) -> Optional[ActionOutput]:
+    async def run(self, message: Message | None = None) -> ActionOutput | None:
         if message is not None:
             should_act = await self._observe(message)
             if not should_act:

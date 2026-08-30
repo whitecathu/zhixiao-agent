@@ -6,8 +6,9 @@ import json
 import logging
 import os
 import re
+from collections.abc import Awaitable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlsplit
 
 import httpx
@@ -16,11 +17,12 @@ import redis.asyncio as redis
 from zhixiao_agent.job_security import verify_job_fields
 from zhixiao_agent.metagpt_runtime import run_metagpt_team
 from zhixiao_agent.model import ModelProfile, OpenAICompatibleModel
+from zhixiao_agent.plugin import PluginHost, load_plugin_tree
 from zhixiao_agent.runtime import AgentRuntime, RuntimeConfig
 from zhixiao_agent.subagent import build_sub_agent_handler
 from zhixiao_agent.tools.mcp_adapter import mcp_config_from_env
-from zhixiao_agent.tools.registry import build_default_registry
-from zhixiao_agent.types import PermissionMode
+from zhixiao_agent.tools.registry import ToolRegistry, build_default_registry
+from zhixiao_agent.types import PermissionMode, RunBudget
 
 QUEUE = "run:queue"
 EVENT_PREFIX = "run:events:"
@@ -37,6 +39,12 @@ _SECRET_VALUE = re.compile(
     r"(?i)((?:authorization|api[_-]?key|password|secret|token)\s*[:=]\s*"
     r"(?:bearer\s+)?)[^\s,;]+"
 )
+
+
+async def _maybe_await(value: Awaitable[Any] | Any) -> Any:
+    if hasattr(value, "__await__"):
+        return await cast(Awaitable[Any], value)
+    return value
 
 
 def _safe_error(value: object) -> str:
@@ -137,6 +145,58 @@ def _parse_network_capabilities(job: dict[str, str]) -> frozenset[str]:
     return capabilities
 
 
+def _parse_positive_int(job: dict[str, str], key: str, default: int) -> int:
+    raw = (job.get(key) or "").strip()
+    if not raw:
+        return default
+    value = int(raw)
+    if value <= 0:
+        raise PermissionError(f"{key} must be a positive integer")
+    return value
+
+
+def _parse_optional_positive_float(job: dict[str, str], key: str) -> float | None:
+    raw = (job.get(key) or "").strip()
+    if not raw:
+        return None
+    value = float(raw)
+    if value <= 0:
+        raise PermissionError(f"{key} must be positive")
+    return value
+
+
+def _parse_verification_commands(job: dict[str, str]) -> tuple[str, ...]:
+    raw = (job.get("verification_commands") or "").strip()
+    if not raw:
+        return ()
+    try:
+        commands = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise PermissionError("verification_commands must be valid JSON") from exc
+    if not isinstance(commands, list) or any(
+        not isinstance(command, str) or not command.strip() for command in commands
+    ):
+        raise PermissionError("verification_commands must be a non-empty string list")
+    if len(commands) > 20:
+        raise PermissionError("verification_commands exceeds the 20 command limit")
+    return tuple(command.strip() for command in commands)
+
+
+def _runtime_budget(job: dict[str, str]) -> RunBudget:
+    defaults = RunBudget()
+    return RunBudget(
+        max_model_turns=_parse_positive_int(
+            job, "max_model_turns", defaults.max_model_turns
+        ),
+        max_tool_calls=_parse_positive_int(job, "max_tool_calls", defaults.max_tool_calls),
+        max_tokens=_parse_positive_int(job, "max_tokens", defaults.max_tokens),
+        max_cost_usd=_parse_optional_positive_float(job, "max_cost_usd"),
+        max_duration_seconds=_parse_positive_int(
+            job, "max_duration_seconds", defaults.max_duration_seconds
+        ),
+    )
+
+
 def _validate_clone_url(value: str) -> str:
     parsed = urlsplit(value)
     allowed_schemes = {
@@ -181,6 +241,52 @@ def _env_cost_per_million(name: str) -> float:
     if raw is None or not str(raw).strip():
         return 0.0
     return float(raw)
+
+
+def _job_flag(job: dict[str, str], key: str) -> bool:
+    return (job.get(key) or "").strip().lower() in {"true", "1", "yes"}
+
+
+def _experimental_env_enabled() -> bool:
+    return bool(
+        mcp_config_from_env()
+        or os.environ.get("SUBAGENT_ENABLED", "").lower() in {"1", "true", "yes"}
+        or os.environ.get("MCP_ENABLED", "").lower() in {"1", "true", "yes"}
+        or os.environ.get("MCP_WHITELIST", "").strip()
+        or os.environ.get("MCP_HTTP_BASE", "").strip()
+    )
+
+
+def _include_experimental(ops_capabilities: frozenset[str]) -> bool:
+    return bool(ops_capabilities & {"mcp", "sub_agent"}) or _experimental_env_enabled()
+
+
+def _load_job_plugin_host(
+    workspace: Path,
+    *,
+    trusted: bool,
+    include_experimental: bool,
+) -> PluginHost:
+    return load_plugin_tree(
+        workspace=workspace,
+        trusted=trusted,
+        settings=None,
+        include_experimental=include_experimental,
+    )
+
+
+def assemble_job_registry(
+    workspace: Path,
+    *,
+    trusted: bool,
+    include_experimental: bool,
+) -> ToolRegistry:
+    """Assemble the per-job tool registry from the same plugin tree as CLI/TUI."""
+    return _load_job_plugin_host(
+        workspace,
+        trusted=trusted,
+        include_experimental=include_experimental,
+    ).tools
 
 
 def build_model() -> OpenAICompatibleModel:
@@ -238,14 +344,7 @@ def build_tool_metadata(
 
 def build_runtime() -> AgentRuntime:
     model = build_model()
-    experimental = bool(
-        mcp_config_from_env()
-        or os.environ.get("SUBAGENT_ENABLED", "").lower() in {"1", "true", "yes"}
-        or os.environ.get("MCP_ENABLED", "").lower() in {"1", "true", "yes"}
-        or os.environ.get("MCP_WHITELIST", "").strip()
-        or os.environ.get("MCP_HTTP_BASE", "").strip()
-    )
-    registry = build_default_registry(include_experimental=experimental)
+    registry = build_default_registry(include_experimental=_experimental_env_enabled())
     return AgentRuntime(model, registry=registry)
 
 
@@ -404,9 +503,11 @@ async def publish_result(
             maxlen=10_000,
             approximate=True,
         )
-    await client.hset(
-        f"{RESULT_PREFIX}{run_id}",
-        mapping={"payload": json.dumps(payload, ensure_ascii=False)},
+    await _maybe_await(
+        client.hset(
+            f"{RESULT_PREFIX}{run_id}",
+            mapping={"payload": json.dumps(payload, ensure_ascii=False)},
+        )
     )
 
 
@@ -425,14 +526,59 @@ async def post_result(run_id: str, payload: dict[str, Any]) -> None:
 
 
 async def _should_stop(client: redis.Redis, run_id: str) -> bool:
-    value = await client.get(f"{CONTROL_PREFIX}{run_id}")
-    return value == "stop"
+    value = await _maybe_await(client.get(f"{CONTROL_PREFIX}{run_id}"))
+    return bool(value == "stop")
+
+
+def _terminal_payload(
+    run_id: str,
+    *,
+    status: str,
+    summary: str,
+    error: str | None,
+    test_command: str | None,
+    termination_reason: str,
+    budget: RunBudget | None = None,
+) -> dict[str, Any]:
+    resolved_budget = budget or RunBudget()
+    verification_outcome = "skipped" if status == "interrupted" else "blocked"
+    return {
+        "schema_version": "1.1",
+        "run_id": run_id,
+        "status": status,
+        "summary": summary,
+        "task_type": "explore",
+        "plan": [],
+        "artifacts": [],
+        "test_command": test_command,
+        "test_exit_code": None,
+        "diff": "",
+        "events": [],
+        "error": error,
+        "verification": {
+            "outcome": verification_outcome,
+            "reason": summary,
+            "waived": False,
+            "stages": [],
+        },
+        "termination_reason": termination_reason,
+        "usage": {
+            "model_turns": 0,
+            "tool_calls": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "cost_usd": 0.0,
+            "elapsed_seconds": 0.0,
+        },
+        "budgets": resolved_budget.model_dump(mode="json"),
+        "next_actions": [],
+    }
 
 
 async def process_job(client: redis.Redis, runtime: AgentRuntime, job: dict[str, str]) -> None:
     _verify_job(job)
     run_id = job["run_id"]
-    cached = await client.hget(f"{RESULT_PREFIX}{run_id}", "payload")
+    cached = await _maybe_await(client.hget(f"{RESULT_PREFIX}{run_id}", "payload"))
     if cached:
         await post_result(run_id, json.loads(cached))
         return
@@ -460,6 +606,15 @@ async def process_job(client: redis.Redis, runtime: AgentRuntime, job: dict[str,
         ops_approved = bool(ops_capabilities)
         network_capabilities = _parse_network_capabilities(job)
         network_approved = bool(network_capabilities)
+        trusted = _job_flag(job, "trusted_workspace")
+        include_experimental = _include_experimental(ops_capabilities)
+        host = _load_job_plugin_host(
+            workspace,
+            trusted=trusted,
+            include_experimental=include_experimental,
+        )
+        runtime.registry = host.tools
+        plugin_prompt = host.render_prompt()
         tool_metadata = build_tool_metadata(
             model=getattr(runtime, "model", None),
             workspace=workspace,
@@ -472,13 +627,19 @@ async def process_job(client: redis.Redis, runtime: AgentRuntime, job: dict[str,
             run_id=run_id,
             on_event=on_event,
         )
-        # Rebind registry when experimental adapters are present for this job.
+        # Rebind via the plugin tree so workspace plugin tools are not wiped.
         registry = getattr(runtime, "registry", None)
-        if tool_metadata and hasattr(runtime, "registry"):
-            if registry is None or (
-                registry.get("mcp") is None and registry.get("sub_agent") is None
-            ):
-                runtime.registry = build_default_registry(include_experimental=True)
+        if tool_metadata and (
+            registry is None
+            or (registry.get("mcp") is None and registry.get("sub_agent") is None)
+        ):
+            host = _load_job_plugin_host(
+                workspace,
+                trusted=trusted,
+                include_experimental=True,
+            )
+            runtime.registry = host.tools
+            plugin_prompt = host.render_prompt()
 
         engine = (job.get("engine") or "langgraph").strip().lower()
         if engine == "metagpt":
@@ -498,6 +659,9 @@ async def process_job(client: redis.Redis, runtime: AgentRuntime, job: dict[str,
                     on_event=on_event,
                     registry=runtime.registry,
                     tool_metadata=tool_metadata or None,
+                    budget=_runtime_budget(job),
+                    allow_unverified=(job.get("allow_unverified") or "").strip() or None,
+                    verification_commands=_parse_verification_commands(job),
                 )
             )
         else:
@@ -514,6 +678,9 @@ async def process_job(client: redis.Redis, runtime: AgentRuntime, job: dict[str,
                         network_approved=network_approved,
                         network_capabilities=network_capabilities,
                         test_command=job.get("test_command") or None,
+                        verification_commands=_parse_verification_commands(job),
+                        allow_unverified=(job.get("allow_unverified") or "").strip() or None,
+                        budget=_runtime_budget(job),
                         isolate_worktree=False,
                         workflow_definition=(
                             json.loads(job["workflow_definition"])
@@ -525,6 +692,7 @@ async def process_job(client: redis.Redis, runtime: AgentRuntime, job: dict[str,
                         ),
                         on_event=on_event,
                         tool_metadata=tool_metadata or None,
+                        plugin_prompt=plugin_prompt,
                     ),
                     run_id=run_id,
                 )
@@ -538,19 +706,15 @@ async def process_job(client: redis.Redis, runtime: AgentRuntime, job: dict[str,
                 except asyncio.CancelledError:
                     # Only mark interrupted when cancel actually took effect.
                     # A race where the run finished before cancel must keep the real result.
-                    payload = {
-                        "run_id": run_id,
-                        "status": "interrupted",
-                        "summary": "Run interrupted by operator.",
-                        "task_type": "explore",
-                        "plan": [],
-                        "artifacts": [],
-                        "test_command": job.get("test_command") or None,
-                        "test_exit_code": None,
-                        "diff": "",
-                        "events": [],
-                        "error": "interrupted",
-                    }
+                    payload = _terminal_payload(
+                        run_id,
+                        status="interrupted",
+                        summary="Run interrupted by operator.",
+                        error="interrupted",
+                        test_command=job.get("test_command") or None,
+                        termination_reason="interrupted",
+                        budget=_runtime_budget(job),
+                    )
                     interrupted = True
                 break
             await asyncio.wait({run_task}, timeout=0.5)
@@ -564,19 +728,14 @@ async def process_job(client: redis.Redis, runtime: AgentRuntime, job: dict[str,
                 if int(event.get("sequence") or 0) not in live_sequences
             ]
     except Exception as exc:
-        payload = {
-            "run_id": run_id,
-            "status": "failed",
-            "summary": "Worker execution failed.",
-            "task_type": "explore",
-            "plan": [],
-            "artifacts": [],
-            "test_command": job.get("test_command") or None,
-            "test_exit_code": None,
-            "diff": "",
-            "events": [],
-            "error": _safe_error(exc),
-        }
+        payload = _terminal_payload(
+            run_id,
+            status="failed",
+            summary="Worker execution failed.",
+            error=_safe_error(exc),
+            test_command=job.get("test_command") or None,
+            termination_reason="runtime_error",
+        )
     await publish_result(
         client,
         run_id,
@@ -588,8 +747,11 @@ async def process_job(client: redis.Redis, runtime: AgentRuntime, job: dict[str,
 
 
 async def serve() -> None:
-    client = redis.from_url(
-        os.environ.get("REDIS_URL", "redis://redis:6379/0"), decode_responses=True
+    client = cast(
+        redis.Redis,
+        redis.from_url(  # type: ignore[no-untyped-call]
+            os.environ.get("REDIS_URL", "redis://redis:6379/0"), decode_responses=True
+        ),
     )
     await ensure_group(client)
     runtime = build_runtime()

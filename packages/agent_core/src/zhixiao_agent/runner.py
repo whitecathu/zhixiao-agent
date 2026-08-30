@@ -4,8 +4,10 @@ import asyncio
 import os
 import re
 import shlex
+import signal
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -50,11 +52,17 @@ class LocalRunner(Runner):
         args = shlex.split(command, posix=os.name != "nt")
         if not args:
             raise ValueError("command cannot be empty")
+        process_kwargs: dict[str, Any] = {}
+        if os.name == "nt":
+            process_kwargs["creationflags"] = 0x00000200  # CREATE_NEW_PROCESS_GROUP
+        else:
+            process_kwargs["start_new_session"] = True
         process = await asyncio.create_subprocess_exec(
             *args,
             cwd=self.boundary.root,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **process_kwargs,
         )
         try:
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
@@ -65,7 +73,7 @@ class LocalRunner(Runner):
                 stderr=stderr.decode(errors="replace"),
             )
         except TimeoutError:
-            process.kill()
+            await _terminate_process_tree(process)
             await process.communicate()
             return CommandResult(
                 command=command,
@@ -75,9 +83,32 @@ class LocalRunner(Runner):
                 timed_out=True,
             )
         except asyncio.CancelledError:
-            process.kill()
+            await _terminate_process_tree(process)
             await process.communicate()
             raise
+
+
+async def _terminate_process_tree(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
+        return
+    if os.name == "nt":
+        terminator = await asyncio.create_subprocess_exec(
+            "taskkill",
+            "/PID",
+            str(process.pid),
+            "/T",
+            "/F",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await terminator.wait()
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)  # type: ignore[attr-defined]
+        except ProcessLookupError:
+            pass
+    if process.returncode is None:
+        process.kill()
 
 
 class BubblewrapRunner(Runner):

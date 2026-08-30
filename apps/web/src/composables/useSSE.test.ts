@@ -42,7 +42,9 @@ describe("subscribeTask", () => {
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
     stream.cancel();
 
-    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    const init = fetchMock.mock.calls[0][1] as {
+      headers: Record<string, string>;
+    };
     const headers = init.headers as Record<string, string>;
     expect(headers.Authorization).toBe("Bearer tok");
     expect(headers["X-Space-Id"]).toBe("42");

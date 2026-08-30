@@ -33,6 +33,7 @@ from app.model.platform import (
     Artifact,
     KnowledgeEntity,
     KnowledgeRelation,
+    McpServer,
     Repository,
     RunStep,
     TaskRun,
@@ -49,8 +50,11 @@ from app.schema.platform import (
     KnowledgeGraphExplore,
     KnowledgeGraphExploreOut,
     KnowledgeRelationOut,
+    McpServerCreate,
+    McpServerUpdate,
     ModelProfileUpdate,
     TaskRunCreate,
+    TaskRunFork,
     WorkerRunResult,
     WorkflowCreate,
     WorkflowDSL,
@@ -373,6 +377,124 @@ class PlatformService:
         await self.session.refresh(model)
         return model
 
+    async def create_mcp_server(
+        self,
+        space_id: int,
+        user_id: int,
+        payload: McpServerCreate,
+    ) -> McpServer:
+        await self.require_space_admin(space_id, user_id)
+        duplicate = await self.session.scalar(
+            select(McpServer.id).where(
+                McpServer.space_id == space_id,
+                McpServer.name == payload.name,
+                McpServer.deleted_at.is_(None),
+            )
+        )
+        if duplicate is not None:
+            raise BizException(
+                ErrorCode.PARAM_INVALID,
+                message="同名 MCP 服务器已存在",
+                http_status=409,
+            )
+        server = McpServer(space_id=space_id, **payload.model_dump())
+        self.session.add(server)
+        await self.session.commit()
+        await self.session.refresh(server)
+        return server
+
+    async def update_mcp_server(
+        self,
+        server_id: int,
+        space_id: int,
+        user_id: int,
+        payload: McpServerUpdate,
+    ) -> McpServer:
+        await self.require_space_admin(space_id, user_id)
+        server = await self.get_scoped(McpServer, server_id, space_id)
+        current = {
+            "name": server.name,
+            "transport": server.transport,
+            "command": server.command,
+            "arguments": server.arguments,
+            "url": server.url,
+            "env_refs": server.env_refs,
+            "credential_env": server.credential_env,
+            "tool_allowlist": server.tool_allowlist,
+            "startup_timeout_seconds": server.startup_timeout_seconds,
+            "call_timeout_seconds": server.call_timeout_seconds,
+            "enabled": server.enabled,
+        }
+        current.update(payload.model_dump(exclude_unset=True))
+        validated = McpServerCreate.model_validate(current)
+        if validated.name != server.name:
+            duplicate = await self.session.scalar(
+                select(McpServer.id).where(
+                    McpServer.space_id == space_id,
+                    McpServer.name == validated.name,
+                    McpServer.id != server.id,
+                    McpServer.deleted_at.is_(None),
+                )
+            )
+            if duplicate is not None:
+                raise BizException(
+                    ErrorCode.PARAM_INVALID,
+                    message="同名 MCP 服务器已存在",
+                    http_status=409,
+                )
+        for key, value in validated.model_dump().items():
+            setattr(server, key, value)
+        await self.session.commit()
+        await self.session.refresh(server)
+        return server
+
+    async def delete_mcp_server(
+        self, server_id: int, space_id: int, user_id: int
+    ) -> McpServer:
+        await self.require_space_admin(space_id, user_id)
+        server = await self.get_scoped(McpServer, server_id, space_id)
+        server.deleted_at = utcnow()
+        server.enabled = False
+        await self.session.commit()
+        await self.session.refresh(server)
+        return server
+
+    async def test_mcp_server(
+        self, server_id: int, space_id: int, user_id: int
+    ) -> dict[str, Any]:
+        """Validate a definition without starting a command or making a request."""
+        await self.require_space_admin(space_id, user_id)
+        server = await self.get_scoped(McpServer, server_id, space_id)
+        McpServerCreate.model_validate(
+            {
+                "name": server.name,
+                "transport": server.transport,
+                "command": server.command,
+                "arguments": server.arguments,
+                "url": server.url,
+                "env_refs": server.env_refs,
+                "credential_env": server.credential_env,
+                "tool_allowlist": server.tool_allowlist,
+                "startup_timeout_seconds": server.startup_timeout_seconds,
+                "call_timeout_seconds": server.call_timeout_seconds,
+                "enabled": server.enabled,
+            }
+        )
+        referenced = sorted(
+            set(server.env_refs.values())
+            | ({server.credential_env} if server.credential_env else set())
+        )
+        return {
+            "server_id": server.id,
+            "status": "valid",
+            "transport": server.transport,
+            "referenced_env": referenced,
+            "configured_env": {name: bool(os.environ.get(name)) for name in referenced},
+            "network_attempted": False,
+            "command_executed": False,
+            "summary": "Configuration is valid; no command or network probe was executed",
+        }
+
     async def create_run(self, space_id: int, user_id: int, payload: TaskRunCreate) -> TaskRun:
         repository = await self.get_scoped(Repository, payload.repository_id, space_id)
         workflow: WorkflowDefinition | None = None
@@ -387,12 +509,18 @@ class PlatformService:
         if payload.agent_id is not None:
             await self.get_scoped(AgentDefinition, payload.agent_id, space_id)
 
+        data = payload.model_dump()
+        budget = data.pop("budget")
+        verification_commands = data.pop("verification_commands")
         run = TaskRun(
             space_id=space_id,
             user_id=user_id,
             status="awaiting_approval",
             workflow_version=workflow.version if workflow is not None else None,
-            **payload.model_dump(),
+            budget_snapshot=budget,
+            usage_snapshot={},
+            verification_commands=verification_commands,
+            **data,
         )
         self.session.add(run)
         await self.session.flush()
@@ -466,8 +594,103 @@ class PlatformService:
     async def get_run(self, run_id: int, space_id: int) -> TaskRun:
         return await self.get_scoped(TaskRun, run_id, space_id)
 
-    async def list_runs(self, space_id: int) -> list[TaskRun]:
-        return await self.list_scoped(TaskRun, space_id)
+    async def list_runs(
+        self,
+        space_id: int,
+        *,
+        workspace_id: int | None = None,
+        status: str | None = None,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+    ) -> list[TaskRun]:
+        statement = select(TaskRun).where(
+            TaskRun.space_id == space_id,
+            TaskRun.deleted_at.is_(None),
+        )
+        if status is not None:
+            statement = statement.where(TaskRun.status == status)
+        if created_from is not None:
+            if created_from.tzinfo is not None:
+                created_from = created_from.astimezone(UTC).replace(tzinfo=None)
+            statement = statement.where(TaskRun.created_at >= created_from)
+        if created_to is not None:
+            if created_to.tzinfo is not None:
+                created_to = created_to.astimezone(UTC).replace(tzinfo=None)
+            statement = statement.where(TaskRun.created_at <= created_to)
+        if workspace_id is not None:
+            workspace = await self.session.get(Workspace, workspace_id)
+            if workspace is None or workspace.deleted_at is not None:
+                raise BizException(ErrorCode.NOT_FOUND, http_status=404)
+            repository = await self.get_scoped(Repository, workspace.repository_id, space_id)
+            statement = statement.where(TaskRun.repository_id == repository.id)
+            if workspace.task_run_id is not None:
+                statement = statement.where(TaskRun.id == workspace.task_run_id)
+        result = await self.session.execute(statement.order_by(TaskRun.id.desc()))
+        return list(result.scalars().all())
+
+    async def fork_run(
+        self,
+        run_id: int,
+        space_id: int,
+        user_id: int,
+        payload: TaskRunFork,
+    ) -> TaskRun:
+        source = await self.get_run(run_id, space_id)
+        repository = await self.get_scoped(Repository, source.repository_id, space_id)
+        overrides = payload.model_dump(exclude_unset=True)
+        run = TaskRun(
+            space_id=space_id,
+            user_id=user_id,
+            repository_id=source.repository_id,
+            workflow_id=source.workflow_id,
+            workflow_version=source.workflow_version,
+            agent_id=source.agent_id,
+            parent_run_id=source.id,
+            session_name=overrides.get("session_name", source.session_name),
+            title=overrides.get("title", f"{source.title} (fork)"),
+            prompt=overrides.get("prompt", source.prompt),
+            permission_mode=overrides.get("permission_mode", source.permission_mode),
+            status="awaiting_approval",
+            budget_snapshot=dict(source.budget_snapshot or {}),
+            usage_snapshot={},
+            allow_unverified=source.allow_unverified,
+            verification_commands=list(source.verification_commands or []),
+        )
+        self.session.add(run)
+        await self.session.flush()
+        requires_network_clone = bool(repository.clone_url and not repository.root_path)
+        approval = Approval(
+            task_run_id=run.id,
+            operation=(
+                "execute_task_network_clone" if requires_network_clone else "execute_task"
+            ),
+            reason=(
+                "Clone the remote repository over the network, then start a forked "
+                "isolated engineering-agent run"
+                if requires_network_clone
+                else "Start a forked isolated engineering-agent run"
+            ),
+            requested_by=user_id,
+            status="pending",
+        )
+        self.session.add(approval)
+        await self.session.commit()
+        await self.session.refresh(run)
+        await self.events.publish(
+            str(run.id),
+            "run.forked",
+            {"run_id": run.id, "parent_run_id": source.id, "status": run.status},
+        )
+        await self.events.publish(
+            str(run.id),
+            "approval.requested",
+            {
+                "run_id": run.id,
+                "approval_id": approval.id,
+                "operation": approval.operation,
+            },
+        )
+        return run
 
     async def list_approvals(self, run_id: int, space_id: int) -> list[Approval]:
         await self.get_run(run_id, space_id)
@@ -767,6 +990,7 @@ class PlatformService:
                 "existing verified workspace diff using open_pull_request."
             )
         try:
+            budget = run.budget_snapshot or {}
             message_id = await self.queue.enqueue(
                 RunJob(
                     run_id=str(run.id),
@@ -787,6 +1011,21 @@ class PlatformService:
                     workflow_version=workflow_version,
                     engine=engine,
                     roles_json=roles_json,
+                    allow_unverified=run.allow_unverified or "",
+                    verification_commands=json.dumps(
+                        run.verification_commands or [], ensure_ascii=False
+                    ),
+                    max_model_turns=str(budget.get("max_model_turns", 30)),
+                    max_tool_calls=str(budget.get("max_tool_calls", 50)),
+                    max_tokens=str(budget.get("max_tokens", 200_000)),
+                    max_cost_usd=(
+                        str(budget["max_cost_usd"])
+                        if budget.get("max_cost_usd") is not None
+                        else ""
+                    ),
+                    max_duration_seconds=str(
+                        budget.get("max_duration_seconds", 1_800)
+                    ),
                 )
             )
         except Exception as exc:
@@ -829,7 +1068,38 @@ class PlatformService:
         run.current_step = "finalize" if run.finished_at else "approval"
         run.diff_text = result.diff
         run.error_message = result.error
-        passed = result.status == "succeeded" and result.test_exit_code in {None, 0}
+        run.termination_reason = result.termination_reason
+        run.usage_snapshot = result.usage or {}
+        if result.budgets:
+            run.budget_snapshot = result.budgets
+        verification_outcome = str(result.verification.get("outcome") or "")
+        verification_waived = bool(result.verification.get("waived"))
+        legacy_verification_passed = (
+            not verification_outcome
+            and bool(result.test_command)
+            and result.test_exit_code == 0
+        )
+        passed = (
+            result.status == "succeeded"
+            and (
+                verification_outcome == "passed"
+                or verification_waived
+                or legacy_verification_passed
+            )
+        )
+        if (
+            result.status == "succeeded"
+            and run.permission_mode in {"edit", "full"}
+            and not passed
+        ):
+            run.status = "failed"
+            run.finished_at = utcnow()
+            run.current_step = "finalize"
+            run.termination_reason = "verification_blocked"
+            run.error_message = (
+                result.error
+                or "write-capable run did not provide passing verification or an explicit waiver"
+            )
         model_usage: dict[str, Any] = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
@@ -841,7 +1111,8 @@ class PlatformService:
         for event in result.events:
             if event.get("event") != "model_turn":
                 continue
-            data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            raw_data = event.get("data")
+            data: dict[str, Any] = raw_data if isinstance(raw_data, dict) else {}
             model_usage["prompt_tokens"] += max(int(data.get("prompt_tokens", 0) or 0), 0)
             model_usage["completion_tokens"] += max(
                 int(data.get("completion_tokens", 0) or 0), 0
@@ -865,6 +1136,8 @@ class PlatformService:
             item["calls"] += 1
             has_model_usage = True
         model_usage["models"] = list(model_breakdown.values())
+        if not run.usage_snapshot and has_model_usage:
+            run.usage_snapshot = model_usage
         run.verification = {
             "callback_applied": True,
             "passed": passed,
@@ -872,6 +1145,8 @@ class PlatformService:
             "exit_code": result.test_exit_code,
             "summary": result.summary,
             "model_usage": model_usage if has_model_usage else None,
+            "details": result.verification,
+            "next_actions": result.next_actions,
         }
 
         count_result = await self.session.execute(
@@ -898,8 +1173,10 @@ class PlatformService:
         for event in result.events:
             if event.get("event") != "tool_result":
                 continue
-            data = event.get("data") if isinstance(event.get("data"), dict) else {}
-            structured = data.get("result") if isinstance(data.get("result"), dict) else {}
+            raw_data = event.get("data")
+            data = raw_data if isinstance(raw_data, dict) else {}
+            raw_structured = data.get("result")
+            structured = raw_structured if isinstance(raw_structured, dict) else {}
             tool_status = str(structured.get("status") or data.get("status", "failed"))
             persisted_status = {
                 "succeeded": "succeeded",
@@ -1001,9 +1278,11 @@ class PlatformService:
                 max((run.finished_at - run.started_at).total_seconds(), 0.0),
             )
         for event in result.events:
-            data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            raw_data = event.get("data")
+            data = raw_data if isinstance(raw_data, dict) else {}
             if event.get("event") == "tool_result":
-                structured = data.get("result") if isinstance(data.get("result"), dict) else {}
+                raw_structured = data.get("result")
+                structured = raw_structured if isinstance(raw_structured, dict) else {}
                 raw_status = str(structured.get("status") or data.get("status", "failed"))
                 status = {
                     "succeeded": "succeeded",

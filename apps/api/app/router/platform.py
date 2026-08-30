@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, Query, Request
@@ -23,6 +24,7 @@ from app.model.platform import (
     EvaluationRun,
     FineTuneJob,
     KnowledgeEntity,
+    McpServer,
     ModelProfile,
     WorkflowDefinition,
 )
@@ -46,6 +48,9 @@ from app.schema.platform import (
     KnowledgeGraphExploreOut,
     KnowledgeRelationCreate,
     KnowledgeRelationOut,
+    McpServerCreate,
+    McpServerOut,
+    McpServerUpdate,
     ModelProfileCreate,
     ModelProfileOut,
     ModelProfileUpdate,
@@ -54,6 +59,7 @@ from app.schema.platform import (
     RunStepCreate,
     RunStepOut,
     TaskRunCreate,
+    TaskRunFork,
     TaskRunOut,
     ToolDescriptor,
     ToolInvocationCreate,
@@ -194,11 +200,27 @@ async def create_task_run(
 
 @router.get("/task-runs")
 async def list_task_runs(
+    workspace_id: int | None = Query(default=None, ge=1),
+    status: str | None = Query(default=None, max_length=32),
+    created_from: datetime | None = Query(default=None),
+    created_to: datetime | None = Query(default=None),
     user=Depends(get_current_user),
     space_id: int = Depends(get_space_id),
     svc: PlatformService = Depends(service),
 ):
-    items = await svc.list_runs(space_id)
+    if created_from is not None and created_to is not None and created_from > created_to:
+        raise BizException(
+            ErrorCode.PARAM_INVALID,
+            message="created_from must not be after created_to",
+            http_status=422,
+        )
+    items = await svc.list_runs(
+        space_id,
+        workspace_id=workspace_id,
+        status=status,
+        created_from=created_from,
+        created_to=created_to,
+    )
     return success([TaskRunOut.model_validate(item).model_dump() for item in items])
 
 
@@ -210,6 +232,23 @@ async def get_task_run(
     svc: PlatformService = Depends(service),
 ):
     run = await svc.get_run(run_id, space_id)
+    return success(TaskRunOut.model_validate(run).model_dump())
+
+
+@router.post("/task-runs/{run_id}/fork")
+async def fork_task_run(
+    run_id: int,
+    payload: TaskRunFork | None = None,
+    user=Depends(get_current_user),
+    space_id: int = Depends(get_space_id),
+    svc: PlatformService = Depends(service),
+):
+    run = await svc.fork_run(
+        run_id,
+        space_id,
+        user["user_id"],
+        payload or TaskRunFork(),
+    )
     return success(TaskRunOut.model_validate(run).model_dump())
 
 
@@ -613,6 +652,73 @@ async def update_model(
 ):
     item = await svc.update_model_profile(model_id, space_id, payload)
     return success(ModelProfileOut.model_validate(item).model_dump())
+
+
+@router.post("/mcp-servers")
+async def create_mcp_server(
+    payload: McpServerCreate,
+    user=Depends(get_current_user),
+    space_id: int = Depends(get_space_id),
+    svc: PlatformService = Depends(service),
+):
+    item = await svc.create_mcp_server(space_id, user["user_id"], payload)
+    return success(McpServerOut.model_validate(item).model_dump())
+
+
+@router.get("/mcp-servers")
+async def list_mcp_servers(
+    user=Depends(get_current_user),
+    space_id: int = Depends(get_space_id),
+    svc: PlatformService = Depends(service),
+):
+    await svc.require_space_member(space_id, user["user_id"])
+    items = await svc.list_scoped(McpServer, space_id)
+    return success([McpServerOut.model_validate(item).model_dump() for item in items])
+
+
+@router.get("/mcp-servers/{server_id}")
+async def get_mcp_server(
+    server_id: int,
+    user=Depends(get_current_user),
+    space_id: int = Depends(get_space_id),
+    svc: PlatformService = Depends(service),
+):
+    await svc.require_space_member(space_id, user["user_id"])
+    item = await svc.get_scoped(McpServer, server_id, space_id)
+    return success(McpServerOut.model_validate(item).model_dump())
+
+
+@router.put("/mcp-servers/{server_id}")
+async def update_mcp_server(
+    server_id: int,
+    payload: McpServerUpdate,
+    user=Depends(get_current_user),
+    space_id: int = Depends(get_space_id),
+    svc: PlatformService = Depends(service),
+):
+    item = await svc.update_mcp_server(server_id, space_id, user["user_id"], payload)
+    return success(McpServerOut.model_validate(item).model_dump())
+
+
+@router.delete("/mcp-servers/{server_id}")
+async def delete_mcp_server(
+    server_id: int,
+    user=Depends(get_current_user),
+    space_id: int = Depends(get_space_id),
+    svc: PlatformService = Depends(service),
+):
+    item = await svc.delete_mcp_server(server_id, space_id, user["user_id"])
+    return success({"id": item.id, "deleted": True})
+
+
+@router.post("/mcp-servers/{server_id}/test")
+async def test_mcp_server(
+    server_id: int,
+    user=Depends(get_current_user),
+    space_id: int = Depends(get_space_id),
+    svc: PlatformService = Depends(service),
+):
+    return success(await svc.test_mcp_server(server_id, space_id, user["user_id"]))
 
 
 @router.post("/evaluations")

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -37,7 +37,7 @@ class Plan(BaseModel):
     goal: str
     context: str = ""
     tasks: list[Task] = Field(default_factory=list)
-    task_map: dict = Field(default_factory=dict)
+    task_map: dict[str, Task] = Field(default_factory=dict)
     current_task_id: str = ""
 
     def add_tasks(self, tasks: list[Task]) -> None:
@@ -48,7 +48,7 @@ class Plan(BaseModel):
             self.tasks = sorted_tasks
         else:
             prefix_length = 0
-            for old_task, new_task in zip(self.tasks, sorted_tasks):
+            for old_task, new_task in zip(self.tasks, sorted_tasks, strict=False):
                 if (
                     old_task.task_id != new_task.task_id
                     or old_task.instruction != new_task.instruction
@@ -91,10 +91,10 @@ class Plan(BaseModel):
         self.current_task_id = current
 
     @property
-    def current_task(self) -> Optional[Task]:
+    def current_task(self) -> Task | None:
         return self.task_map.get(self.current_task_id)
 
-    def finish_current_task(self) -> Optional[Task]:
+    def finish_current_task(self) -> Task | None:
         if self.current_task_id and self.current_task:
             self.current_task.is_finished = True
         self._update_current_task()

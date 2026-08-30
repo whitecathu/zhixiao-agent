@@ -1,11 +1,13 @@
 """Offline evaluation gates that do not require a live model provider.
 
-Produces an offline-harness report from deterministic policy/security checks
-plus checked-in fixture results. It does not measure live model quality.
+Security policy checks and the behavioral AgentRuntime runner are the quality
+gates. Checked-in fixture results are provenance for the report pipeline
+(``--validate-only`` / summarize_results) and are not a live quality score.
 """
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 from pathlib import Path
 
@@ -38,9 +40,15 @@ def assert_security_gates() -> None:
 
 def main() -> None:
     assert_security_gates()
-    import sys
-
     sys.path.insert(0, str(ROOT))
+    from run_behavioral import run_gates, write_report
+
+    behavioral = run_gates()
+    write_report(behavioral)
+    if not behavioral["passed"]:
+        print(json.dumps(behavioral, ensure_ascii=False, indent=2))
+        raise SystemExit(1)
+
     from run_scenarios import (
         load_json,
         summarize_results,
@@ -48,6 +56,7 @@ def main() -> None:
         validate_result_provenance,
     )
 
+    # Fixture metrics describe checked-in provenance, not Agent quality.
     manifest = load_json(ROOT / "scenarios.json")
     scenarios = validate_manifest(manifest)
     results = load_json(FIXTURE)
@@ -59,6 +68,8 @@ def main() -> None:
         "scenario_count": len(scenarios),
         **provenance,
         "metrics": metrics,
+        "behavioral_passed": True,
+        "behavioral_evaluation_mode": behavioral["evaluation_mode"],
     }
     output = ROOT / "artifacts" / "offline_report.json"
     output.parent.mkdir(parents=True, exist_ok=True)
